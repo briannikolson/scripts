@@ -1,0 +1,445 @@
+setenforce 0
+sed -i 's/^SELINUX=.*/SELINUX=disabled/g' /etc/selinux/config
+iptables -I INPUT 1 -p tcp --match multiport --dports 25,110,143,465,587,993,995 -j ACCEPT
+yum update -y
+yum -y install nano wget net-tools epel-release yum-utils
+yum -y install https://dl.fedoraproject.org/pub/epel/epel-release-latest-7.noarch.rpm
+yum -y install http://rpms.remirepo.net/enterprise/remi-release-7.rpm
+yum-config-manager --enable remi-php72
+yum -y install nginx mariadb-server php php-mysqlnd php-fpm php-opcache php-cli php-gd php-curl htop
+php -v
+systemctl start nginx
+systemctl status nginx
+systemctl enable nginx
+systemctl start mariadb
+systemctl status mariadb
+systemctl enable mariadb
+systemctl stop firewalld
+systemctl disable firewalld
+
+mysql -uroot <<MYSQL_SCRIPT
+CREATE DATABASE postfix CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE USER 'postfixadmin'@'localhost' IDENTIFIED BY 'postfixadmin';
+GRANT ALL PRIVILEGES ON postfix.* TO 'postfixadmin'@'localhost';
+FLUSH PRIVILEGES;
+MYSQL_SCRIPT
+
+cp /etc/php-fpm.d/www.conf /etc/php-fpm.d/www.conf.backup
+sed -i 's/user =.*/user = nginx/' /etc/php-fpm.d/www.conf
+sed -i 's/group =.*/group = nginx/' /etc/php-fpm.d/www.conf
+sed -i 's/;listen.owner =.*/listen.owner = nginx/' /etc/php-fpm.d/www.conf
+sed -i 's/;listen.group =.*/listen.group = nginx/' /etc/php-fpm.d/www.conf
+sed -i "s'listen =.*'listen = /run/php-fpm/www.sock'" /etc/php-fpm.d/www.conf
+
+sudo chown -R nginx:nginx /var/lib/php
+
+sudo systemctl enable php-fpm
+sudo systemctl start php-fpm
+
+sudo systemctl enable nginx
+sudo systemctl start nginx
+
+wget https://sourceforge.net/projects/postfixadmin/files/postfixadmin-3.3.8/PostfixAdmin%203.3.8.tar.gz -O PostfixAdmin-tar.gz
+tar -xvf PostfixAdmin-tar.gz
+mv postfixadmin-postfixadmin-* /var/www/html/postfixadmin
+mkdir /var/www/html/postfixadmin/templates_c
+chown -R nginx:nginx /var/www/html/postfixadmin/
+
+cat > /var/www/html/postfixadmin/config.local.php << EOL
+<?php
+\$CONF['configured'] = true;
+\$CONF['database_type'] = 'mysqli';
+\$CONF['database_host'] = 'localhost';
+\$CONF['database_user'] = 'postfixadmin';
+\$CONF['database_password'] = 'postfixadmin';
+\$CONF['database_name'] = 'postfix';
+\$CONF['fetchmail'] = 'NO';
+\$CONF['show_footer_text'] = 'NO';
+\$CONF['quota'] = 'YES';
+\$CONF['domain_quota'] = 'YES';
+\$CONF['quota_multiplier'] = '1024000';
+\$CONF['used_quotas'] = 'YES';
+\$CONF['new_quota_table'] = 'YES';
+\$CONF['aliases'] = '0';
+\$CONF['mailboxes'] = '0';
+\$CONF['maxquota'] = '0';
+\$CONF['domain_quota_default'] = '0';
+?>
+EOL
+
+sudo -u nginx php /var/www/html/postfixadmin/public/upgrade.php
+
+bash /var/www/html/postfixadmin/scripts/postfixadmin-cli admin add admin@localhost.com --password XYrA6zebrU6vEtu --password2 XYrA6zebrU6vEtu --superadmin 1 --active 1
+
+cat > /etc/nginx/conf.d/postfixadmin.conf << EOF
+server {
+        listen 80;
+        root /var/www/html/postfixadmin/public;
+        index index.html index.htm index.php;
+        server_name localhost;
+
+        location ~ \.php\$ {
+          fastcgi_split_path_info ^(.+\.php)(/.+)\$;
+          fastcgi_pass unix:/var/run/php-fpm/www.sock;
+          fastcgi_index index.php;
+          include fastcgi_params;
+          fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
+          fastcgi_intercept_errors off;
+          fastcgi_buffer_size 16k;
+          fastcgi_buffers 4 16k;
+          fastcgi_connect_timeout 600;
+          fastcgi_send_timeout 600;
+          fastcgi_read_timeout 600;
+        }
+
+
+   location / {
+       try_files \$uri \$uri/ =404;
+   }
+
+}
+EOF
+
+sudo nginx -t
+systemctl restart nginx
+systemctl status nginx
+
+yum -y install postfix && yum -y remove sendmail
+cp /etc/postfix/main.cf /etc/postfix/main.cf.backup
+
+cat > /etc/postfix/main.cf << EOF
+myhostname = mail.localhost.com
+mydomain = localhost.com
+myorigin = \$mydomain
+inet_interfaces = all
+inet_protocols = ipv4
+mynetworks_style = host
+mynetworks = \$config_directory/mynetworks
+smtpd_banner = \$myhostname ESMTP \$mail_name
+virtual_alias_maps        = proxy:mysql:\$config_directory/sql/virtual_alias_maps.cf
+virtual_mailbox_domains        = proxy:mysql:\$config_directory/sql/virtual_domains_maps.cf
+virtual_mailbox_maps        = proxy:mysql:\$config_directory/sql/virtual_mailbox_maps.cf
+#virtual_mailbox_limit_maps    = proxy:mysql:\$config_directory/sql/virtual_mailbox_limit_maps.cf
+virtual_mailbox_base        = /var/spool/mail
+virtual_minimum_uid = 1024
+virtual_uid_maps = static:1024
+virtual_gid_maps = static:1024
+mailbox_size_limit        = 0
+message_size_limit        = 0
+virtual_mailbox_limit     = 0
+relay_domains            = proxy:mysql:\$config_directory/sql/relay_domains.cf
+relay_recipient_maps        = proxy:mysql:\$config_directory/sql/relay_recipient_maps.cf
+transport_maps            = proxy:mysql:\$config_directory/sql/transport_maps.cf
+virtual_transport        = dovecot
+dovecot_destination_recipient_limit = 1
+broken_sasl_auth_clients    = yes
+smtpd_helo_required        = yes
+smtpd_client_restrictions    = permit_sasl_authenticated
+smtpd_sender_restrictions    = permit_sasl_authenticated
+smtpd_sasl_auth_enable        = yes
+smtpd_sasl_security_options    = noanonymous
+smtpd_sasl_tls_security_options    = \$smtpd_sasl_security_options
+smtpd_sasl_type            = dovecot
+smtpd_sasl_path            = private/auth
+mynetworks = 127.0.0.0/8, 91.215.176.174/32
+EOF
+
+cp /etc/postfix/master.cf /etc/postfix/master.cf.backup
+cat >> /etc/postfix/master.cf << EOL
+submission   inet  n  -  n  -  -  smtpd
+  -o smtpd_tls_security_level=may
+  -o smtpd_sasl_auth_enable=yes
+  -o smtpd_sasl_type=dovecot
+  -o smtpd_sasl_path=/var/spool/postfix/private/auth
+  -o smtpd_sasl_security_options=noanonymous
+  -o smtpd_sasl_local_domain=\$myhostname
+
+smtps   inet  n  -  n  -  -  smtpd
+  -o syslog_name=postfix/smtps
+  -o smtpd_tls_wrappermode=yes
+  -o smtpd_sasl_auth_enable=yes
+  -o smtpd_client_restrictions=permit_sasl_authenticated,reject
+
+dovecot   unix  -  n  n  -  -  pipe
+  flags=DRhu user=vmail:vmail argv=/usr/lib/dovecot/deliver -d \${recipient}
+EOL
+
+mkdir /etc/postfix/sql/
+
+touch /etc/postfix/sql/virtual_alias_maps.cf
+cat > /etc/postfix/sql/virtual_alias_maps.cf << EOL
+hosts        = localhost
+dbname        = postfix
+user        = postfixadmin
+password    = postfixadmin
+table        = alias
+select_field    = goto
+where_field    = address
+additional_conditions = AND active = '1'
+EOL
+
+touch /etc/postfix/sql/virtual_domains_maps.cf
+cat > /etc/postfix/sql/virtual_domains_maps.cf << EOL
+hosts        = localhost
+dbname        = postfix
+user        = postfixadmin
+password    = postfixadmin
+table        = domain
+select_field    = description
+where_field    = domain
+additional_conditions = AND backupmx = '0' AND active = '1'
+EOL
+
+touch /etc/postfix/sql/virtual_mailbox_maps.cf
+cat > /etc/postfix/sql/virtual_mailbox_maps.cf << EOL
+hosts        = localhost
+dbname        = postfix
+user        = postfixadmin
+password    = postfixadmin
+table        = mailbox
+select_field    = maildir
+where_field    = username
+additional_conditions = AND active = '1'
+EOL
+
+touch /etc/postfix/sql/virtual_mailbox_limit_maps.cf
+cat > /etc/postfix/sql/virtual_mailbox_limit_maps.cf << EOL
+hosts        = localhost
+dbname        = postfix
+user        = postfixadmin
+password    = postfixadmin
+table        = mailbox
+select_field    = quota
+where_field    = username
+additional_conditions = AND active = '1'
+EOL
+
+touch /etc/postfix/sql/relay_domains.cf
+cat > /etc/postfix/sql/relay_domains.cf << EOL
+hosts        = localhost
+dbname        = postfix
+user        = postfixadmin
+password    = postfixadmin
+table        = domain
+select_field    = domain
+where_field    = domain
+additional_conditions = AND backupmx = '1' AND active = '1'
+EOL
+
+touch /etc/postfix/sql/relay_recipient_maps.cf
+cat > /etc/postfix/sql/relay_recipient_maps.cf << EOL
+hosts        = localhost
+dbname        = postfix
+user        = postfixadmin
+password    = postfixadmin
+table        = alias
+select_field    = goto
+where_field    = address
+additional_conditions = AND active = '1'
+EOL
+
+touch etc/postfix/sql/transport_maps.cf
+cat > /etc/postfix/sql/transport_maps.cf << EOL
+hosts        = localhost
+dbname        = postfix
+user        = postfixadmin
+password    = postfixadmin
+table        = domain
+select_field    = transport
+where_field    = domain
+additional_conditions = AND active = '1'
+EOL
+
+chown root:postfix /etc/postfix/sql/ -R
+chcon -u system_u /etc/postfix/sql -R
+chmod 0640 /etc/postfix/sql/*.cf
+chmod 0750 /etc/postfix/sql/
+newaliases
+
+yum -y install dovecot dovecot-mysql dovecot-pigeonhole
+
+cp /etc/dovecot/dovecot.conf /etc/dovecot/dovecot.conf.backup
+
+cat > /etc/dovecot/dovecot.conf << EOL
+protocols = pop3
+!include conf.d/*.conf
+!include_try local.conf
+EOL
+
+cp /etc/dovecot/conf.d/10-auth.conf /etc/dovecot/conf.d/10-auth.conf.backup
+
+cat > /etc/dovecot/conf.d/10-auth.conf << EOL
+disable_plaintext_auth = no
+auth_mechanisms = plain login
+!include auth-sql.conf.ext
+EOL
+
+cp /etc/dovecot/conf.d/10-mail.conf /etc/dovecot/conf.d/10-mail.conf.backup
+
+cat > /etc/dovecot/conf.d/10-mail.conf << EOL
+namespace inbox {
+  inbox = yes
+}
+mbox_write_locks = fcntl
+mail_location = maildir:/var/spool/mail/%d/%n
+mail_privileged_group = mail
+mail_access_groups = mail
+mmap_disable = yes
+first_valid_uid = 8
+first_valid_gid = 12
+EOL
+
+chmod -R 777 /var/spool/mail/
+
+cp /etc/dovecot/conf.d/10-master.conf /etc/dovecot/conf.d/10-master.conf.backup
+
+cat > /etc/dovecot/conf.d/10-master.conf << EOL
+service imap-login {
+  inet_listener imap {
+    port = 0
+  }
+}
+service pop3-login {
+  inet_listener pop3 {
+    port = 0
+  }
+}
+service auth {
+  unix_listener auth-userdb {
+    mode = 0600
+    user = vmail
+    group = vmail
+  }
+  unix_listener /var/spool/postfix/private/auth {
+    mode = 0660
+    user = postfix
+    group = postfix
+  }
+}
+log_path=/var/log/mail.log
+EOL
+
+cp /etc/dovecot/conf.d/10-ssl.conf /etc/dovecot/conf.d/10-ssl.conf.backup
+
+cat > /etc/dovecot/conf.d/10-ssl.conf << EOL
+ssl = yes
+#ssl_cert = </etc/ssl/mail/public.pem
+#ssl_key = </etc/ssl/mail/private.key
+EOL
+
+cp /etc/dovecot/conf.d/15-lda.conf /etc/dovecot/conf.d/15-lda.conf.backup
+
+cat > /etc/dovecot/conf.d/15-lda.conf << EOL
+postmaster_address = postmaster@mail.localhost.com
+hostname = mail.localhost.com
+lda_mailbox_autocreate = yes
+lda_mailbox_autosubscribe = yes
+protocol lda {
+  mail_plugins = sieve
+}
+EOL
+
+cp /etc/dovecot/conf.d/20-managesieve.conf /etc/dovecot/conf.d/20-managesieve.conf.backup
+
+cat > /etc/dovecot/conf.d/20-managesieve.conf << EOL
+protocols = \$protocols sieve
+EOL
+
+cp /etc/dovecot/conf.d/90-sieve.conf /etc/dovecot/conf.d/90-sieve.conf.backup
+
+cat > /etc/dovecot/conf.d/90-sieve.conf << EOL
+plugin {
+  sieve = /var/spool/mail/%Ld/%Ln.sieve/.dovecot.sieve
+  sieve_dir = /var/spool/mail/%Ld/%Ln.sieve/
+  sieve_extensions = +notify +imapflags
+  }
+EOL
+
+cat > /etc/dovecot/dovecot-sql.conf.ext << EOL
+driver = mysql
+connect = host=localhost dbname=postfix user=postfixadmin password=postfixadmin
+user_query = \
+  SELECT CONCAT("/var/spool/mail/", domain) AS home, 8 AS uid, 12 AS gid, \
+    'maildir:/var/spool/mail/%d/%n' AS mail, CONCAT("dirsize:storage=", quota) AS quota \
+  FROM mailbox WHERE username = '%u' AND active = '1'
+password_query = \
+  SELECT username AS user, password, \
+    CONCAT("/var/spool/mail/", domain) AS userdb_home, 8 AS userdb_uid, 12 AS userdb_gid \
+  FROM mailbox WHERE username = '%u' AND active='1'
+iterate_query = SELECT username AS user FROM mailbox WHERE active='1'
+EOL
+
+chcon -u system_u /etc/dovecot/dovecot-sql.conf.ext
+chmod 0600 /etc/dovecot/dovecot-sql.conf.ext
+
+systemctl enable dovecot
+systemctl start dovecot
+systemctl status dovecot
+
+systemctl enable postfix
+systemctl restart postfix
+systemctl status postfix
+
+yum -y install opendkim
+mkdir -p /etc/opendkim/keys
+chown -R opendkim:opendkim /etc/opendkim
+chmod -R go-wrx /etc/opendkim/keys
+
+cp /etc/opendkim.conf /etc/opendkim.conf.backup
+
+cat > /etc/opendkim.conf << EOL
+AutoRestart Yes
+AutoRestartRate 10/1h
+PidFile /var/run/opendkim/opendkim.pid
+Mode sv
+Syslog  yes
+SyslogSuccess yes
+UserID  opendkim:opendkim
+Socket local:/var/run/opendkim/opendkim.sock
+Umask 000
+Background yes
+SendReports yes
+SoftwareHeader  yes
+Canonicalization relaxed/simple
+Selector  default
+MinimumKeyBits  1024
+KeyFile /etc/opendkim/keys/default.private
+OversignHeaders From
+KeyTable /etc/opendkim/KeyTable
+SigningTable refile:/etc/opendkim/SigningTable
+ExternalIgnoreList refile:/etc/opendkim/TrustedHosts
+InternalHosts refile:/etc/opendkim/TrustedHosts
+EOL
+
+chmod g+x /var/run/opendkim/
+
+hash -r
+service opendkim restart
+service postfix restart
+
+mkdir /etc/opendkim/keys/mail.linuxexpert.ru
+opendkim-genkey -D /etc/opendkim/keys/mail.linuxexpert.ru/ -d mail.linuxexpert.ru -s default
+export LC_ALL=en_US.UTF-8
+export LANGUAGE=en_US.UTF-8
+chown -R opendkim:opendkim /etc/opendkim/keys/mail.linuxexpert.ru
+mv /etc/opendkim/keys/mail.linuxexpert.ru/default.private /etc/opendkim/keys/mail.linuxexpert.ru/default
+echo -e "default._domainkey.mail.linuxexpert.ru mail.linuxexpert.ru:default:/etc/opendkim/keys/mail.linuxexpert.ru/default" >> /etc/opendkim/KeyTable
+echo -e "*@mail.linuxexpert.ru default._domainkey.mail.linuxexpert.ru" >> /etc/opendkim/SigningTable
+echo -e "mail.linuxexpert.ru\mx.mail.linuxexpert.ru" >> /etc/opendkim/TrustedHosts
+hash -r
+service opendkim restart
+service postfix restart
+
+cat /etc/opendkim/keys/mail.linuxexpert.ru/default.txt
+default._domainkey  IN  TXT ( "v=DKIM1; k=rsa; "
+    "p=MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDVg8jvL9QUOp2LO7RnEXOf8zmPFDd3IeyygVVSrf9yMsXOr86vkEH8fP+0qXDrmNs/kv02GWv5a0B5/M2FjAS99I5TAsE/V/vuwIz17Sd/R12L9atesfUFEUt7Z5bga9WH1NrBk3dJxrCsYa77txn1JOTYmIRjIazHfUMX61A8JQIDAQAB" )  ; ----- DKIM key default for mail.linuxexpert.ru
+
+cat >> /etc/postfix/main.cf << EOL
+### OpenDKIM
+milter_default_action = accept
+milter_protocol = 2
+smtpd_milters = unix:/var/run/opendkim/opendkim.sock
+non_smtpd_milters = \$smtpd_milters
+EOL
+
+systemctl restart postfix
