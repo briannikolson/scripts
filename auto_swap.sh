@@ -10,7 +10,7 @@ RAM_MB=$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo)
 
 echo "RAM: ${RAM_MB} MB"
 
-# enterprise логика расчета swap
+# enterprise правило расчета swap
 if (( RAM_MB <= 2048 )); then
     TARGET_SWAP_MB=$((RAM_MB * 2))
 elif (( RAM_MB <= 8192 )); then
@@ -23,7 +23,7 @@ fi
 
 echo "Calculated swap: ${TARGET_SWAP_MB} MB"
 
-CURRENT_SWAP_MB=$(swapon --show --bytes --noheadings 2>/dev/null | awk '{sum+=$3} END {printf "%d", sum/1024/1024}')
+CURRENT_SWAP_MB=$(swapon --show --bytes --noheadings 2>/dev/null | awk '{sum+=$3} END {print int(sum/1024/1024)}')
 [ -z "$CURRENT_SWAP_MB" ] && CURRENT_SWAP_MB=0
 
 echo "Current swap: ${CURRENT_SWAP_MB} MB"
@@ -34,9 +34,8 @@ if (( CURRENT_SWAP_MB >= TARGET_SWAP_MB )); then
     exit 0
 fi
 
-echo "Configuring swap..."
+echo "Configuring swapfile..."
 
-# если swapfile уже есть — расширяем
 if [ -f "$SWAPFILE" ]; then
 
     echo "Existing swapfile found"
@@ -47,14 +46,17 @@ if [ -f "$SWAPFILE" ]; then
 
     if (( CURRENT_FILE_MB < TARGET_SWAP_MB )); then
         echo "Expanding swapfile from ${CURRENT_FILE_MB}MB to ${TARGET_SWAP_MB}MB"
-        fallocate -l ${TARGET_SWAP_MB}M "$SWAPFILE" 2>/dev/null || dd if=/dev/zero of="$SWAPFILE" bs=1M count=$TARGET_SWAP_MB
+
+        fallocate -l ${TARGET_SWAP_MB}M "$SWAPFILE" 2>/dev/null \
+        || dd if=/dev/zero of="$SWAPFILE" bs=1M count=$TARGET_SWAP_MB
     fi
 
 else
 
     echo "Creating swapfile ${TARGET_SWAP_MB}MB"
 
-    fallocate -l ${TARGET_SWAP_MB}M "$SWAPFILE" 2>/dev/null || dd if=/dev/zero of="$SWAPFILE" bs=1M count=$TARGET_SWAP_MB
+    fallocate -l ${TARGET_SWAP_MB}M "$SWAPFILE" 2>/dev/null \
+    || dd if=/dev/zero of="$SWAPFILE" bs=1M count=$TARGET_SWAP_MB
 
 fi
 
@@ -64,7 +66,7 @@ mkswap "$SWAPFILE"
 
 swapon "$SWAPFILE"
 
-# fstab
+# добавляем в автозагрузку
 if ! grep -q "$SWAPFILE" /etc/fstab; then
     echo "$SWAPFILE swap swap defaults 0 0" >> /etc/fstab
 fi
@@ -78,5 +80,6 @@ grep -q vm.vfs_cache_pressure /etc/sysctl.conf || echo "vm.vfs_cache_pressure=50
 
 echo
 echo "Swap configured successfully"
+
 swapon --show
 free -h
