@@ -116,14 +116,16 @@ function Get-1CPlatforms {
             Write-Host "  Checking: $path" -ForegroundColor DarkGray
             Get-ChildItem $path -Directory -ErrorAction SilentlyContinue | ForEach-Object{
                 $ragent = Join-Path $_.FullName "bin\ragent.exe"
+                $ras = Join-Path $_.FullName "bin\ras.exe"
                 
                 if(Test-Path $ragent){
                     $platforms += [PSCustomObject]@{
                         Version = $_.Name
                         Path = $_.FullName
                         Ragent = $ragent
+                        HasRAS = Test-Path $ras
                     }
-                    Write-Host "    Found: $($_.Name)" -ForegroundColor Green
+                    Write-Host "    Found: $($_.Name) (RAS: $(Test-Path $ras))" -ForegroundColor Green
                 }
             }
         }
@@ -146,7 +148,8 @@ function Show-Platforms {
     
     $i = 1
     foreach($p in $platforms){
-        Write-Host "$i) $($p.Version) - $($p.Path)" -ForegroundColor Green
+        $rasIcon = if($p.HasRAS) { "[RAS available]" } else { "[No RAS]" }
+        Write-Host "$i) $($p.Version) - $($p.Path) $rasIcon" -ForegroundColor Green
         $i++
     }
 }
@@ -359,7 +362,6 @@ function Create-1CService {
     
     $srvinfo = "$disk`:\1CServer\$($platform.Version)_$port"
     
-    # Проверка свободного места
     $diskInfo = Get-AvailableDisks | Where-Object {$_.DeviceID -eq "$disk`:"}
     $freeGB = [math]::Round($diskInfo.FreeSpace/1GB, 1)
     
@@ -447,28 +449,327 @@ function Restart-1CService {
 }
 
 # ============================================
+# RAS SERVICES MANAGEMENT
+# ============================================
+
+function Get-RASServices {
+    # Ищем все службы, в пути которых есть ras.exe
+    Get-CimInstance Win32_Service |
+    Where-Object {$_.PathName -match "ras\.exe"}
+}
+
+function Show-RASServices {
+    $services = Get-RASServices
+    
+    Write-Host ""
+    Write-Host "RAS Services"
+    Write-Host "============"
+    
+    if(!$services){
+        Write-Host "No RAS services found"
+        return
+    }
+    
+    foreach($svc in $services) {
+        # Извлекаем порт из разных мест
+        $port = "unknown"
+        
+        if($svc.Name -match "(\d+)$") {
+            $port = $matches[1]
+        }
+        elseif($svc.DisplayName -match "ras:(\d+)") {
+            $port = $matches[1]
+        }
+        elseif($svc.PathName -match "--port[= ](\d+)") {
+            $port = $matches[1]
+        }
+        
+        # Извлекаем порт агента
+        $agentPort = "unknown"
+        if($svc.DisplayName -match "agent:(\d+)") {
+            $agentPort = $matches[1]
+        }
+        elseif($svc.PathName -match "(\w+):(\d+)") {
+            $agentPort = $matches[2]
+        }
+        
+        Write-Host ""
+        Write-Host "Service Name  : $($svc.Name)" -ForegroundColor Green
+        Write-Host "Display Name  : $($svc.DisplayName)" -ForegroundColor Gray
+        Write-Host "RAS Port      : $port" -ForegroundColor Gray
+        Write-Host "Agent Port    : $agentPort" -ForegroundColor Gray
+        Write-Host "State         : $($svc.State)" -ForegroundColor $(if($svc.State -eq "Running"){"Green"}else{"Red"})
+        Write-Host "-------------------"
+    }
+}
+
+function Remove-RASService {
+    param($ServiceName)
+    
+    Write-Host "Stopping RAS service: $ServiceName" -ForegroundColor Yellow
+    Stop-Service $ServiceName -Force -ErrorAction SilentlyContinue
+    
+    try{
+        (Get-Service $ServiceName).WaitForStatus("Stopped","00:00:20")
+    } catch {}
+    
+    sc.exe delete "$ServiceName" | Out-Null
+    Write-Host "RAS service deleted: $ServiceName" -ForegroundColor Green
+}
+
+function Create-RASService {
+    # Ищем платформу с RAS
+    $platforms = Get-1CPlatforms
+    $rasPlatform = $platforms | Where-Object { $_.HasRAS } | Select-Object -First 1
+    
+    if(-not $rasPlatform) {
+        Write-Host "No platform with RAS found!" -ForegroundColor Red
+        return
+    }
+    
+    # Показываем существующие RAS службы
+    $existingRASServices = Get-RASServices
+    if($existingRASServices) {
+        Write-Host ""
+        Write-Host "Existing RAS services found:" -ForegroundColor Yellow
+        foreach($svc in $existingRASServices) {
+            Write-Host "  - $($svc.Name) ($($svc.State))" -ForegroundColor Gray
+        }
+        Write-Host ""
+    }
+    
+    # Показываем существующие серверы 1С
+    $servers = Get-1CServerMap
+    if($servers) {
+        Write-Host ""
+        Write-Host "Available 1C servers (agents):" -ForegroundColor Cyan
+        $i = 1
+        foreach($srv in $servers) {
+            Write-Host "$i) Port $($srv.Port) - Version $($srv.Version) - State: $($srv.State)" -ForegroundColor $(if($srv.State -eq "Running"){"Green"}else{"Yellow"})
+            $i++
+        }
+        Write-Host ""
+        $useExisting = Read-Host "Connect to existing server? (y/n) (n - manual entry)"
+        if($useExisting -eq 'y') {
+            $srvChoice = Read-Host "Select server number (or 0 to cancel)"
+            if($srvChoice -eq "0") {
+                Write-Host "Operation cancelled" -ForegroundColor Yellow
+                return
+            }
+            $selectedServer = $servers[$srvChoice-1]
+            if($selectedServer) {
+                $ctrlPort = $selectedServer.Port
+                $agentName = "localhost"
+                Write-Host "Will connect to agent on port: $ctrlPort" -ForegroundColor Green
+            } else {
+                Write-Host "Invalid selection, using manual entry" -ForegroundColor Yellow
+                $ctrlPort = Read-Host "Enter agent port (default: 1540)"
+                if([string]::IsNullOrWhiteSpace($ctrlPort)){ $ctrlPort = "1540" }
+                $agentName = Read-Host "Enter agent host (default: localhost)"
+                if([string]::IsNullOrWhiteSpace($agentName)){ $agentName = "localhost" }
+            }
+        } else {
+            $ctrlPort = Read-Host "Enter agent port (default: 1540)"
+            if([string]::IsNullOrWhiteSpace($ctrlPort)){ $ctrlPort = "1540" }
+            $agentName = Read-Host "Enter agent host (default: localhost)"
+            if([string]::IsNullOrWhiteSpace($agentName)){ $agentName = "localhost" }
+        }
+    } else {
+        $ctrlPort = Read-Host "Enter agent port (default: 1540)"
+        if([string]::IsNullOrWhiteSpace($ctrlPort)){ $ctrlPort = "1540" }
+        $agentName = Read-Host "Enter agent host (default: localhost)"
+        if([string]::IsNullOrWhiteSpace($agentName)){ $agentName = "localhost" }
+    }
+    
+    $rasPort = Read-Host "Enter RAS port (default: 1545)"
+    if([string]::IsNullOrWhiteSpace($rasPort)){ $rasPort = "1545" }
+    
+    # Проверяем, не занят ли порт RAS
+    $existingRAS = Get-RASServices | Where-Object { 
+        $_.PathName -match "--port[= ]$rasPort" -or 
+        $_.Name -match $rasPort -or 
+        $_.DisplayName -match "ras:$rasPort"
+    }
+    
+    if($existingRAS) {
+        Write-Host "WARNING: RAS service on port $rasPort already exists!" -ForegroundColor Red
+        Write-Host "Existing service: $($existingRAS.Name)" -ForegroundColor Yellow
+        $confirm = Read-Host "Delete existing and recreate? (y/n)"
+        if($confirm -eq 'y') {
+            $existingRAS | ForEach-Object { Remove-RASService $_.Name }
+            Start-Sleep -Seconds 2
+        } else {
+            Write-Host "Operation cancelled" -ForegroundColor Yellow
+            return
+        }
+    }
+    
+    $rasPath = $rasPlatform.Ragent -replace "ragent.exe", "ras.exe"
+    $arch = Get-1CArchitecture $rasPath
+    
+    # Используем короткое имя для службы (без пробелов)
+    $serviceShortName = "1C_RAS_$rasPort"
+    # Красивое имя для отображения
+    $serviceDisplayName = "1C:Enterprise 8.3 ($($rasPlatform.Version)) RAS Agent ($arch) (agent:$ctrlPort, ras:$rasPort)"
+    
+    Write-Host ""
+    Write-Host "=== СОЗДАНИЕ RAS СЛУЖБЫ ===" -ForegroundColor Cyan
+    Write-Host "Platform version: $($rasPlatform.Version)" -ForegroundColor Gray
+    Write-Host "Architecture: $arch" -ForegroundColor Gray
+    Write-Host "Service name (short): $serviceShortName" -ForegroundColor Green
+    Write-Host "Display name: $serviceDisplayName" -ForegroundColor Green
+    Write-Host "Agent: $agentName`:$ctrlPort" -ForegroundColor Gray
+    Write-Host "RAS port: $rasPort" -ForegroundColor Gray
+    Write-Host "RAS path: $rasPath" -ForegroundColor Gray
+    
+    $confirm = Read-Host "Create RAS service? (y/n)"
+    if($confirm -ne 'y') {
+        Write-Host "Operation cancelled" -ForegroundColor Yellow
+        return
+    }
+    
+    # Команда с привязкой к конкретному агенту
+    $binary = "`"$rasPath`" cluster --service --port=$rasPort $agentName`:$ctrlPort"
+    
+    # Используем PowerShell New-Service вместо sc.exe
+    try {
+        # Удаляем старую службу если есть
+        $oldService = Get-Service -Name $serviceShortName -ErrorAction SilentlyContinue
+        if($oldService) {
+            Write-Host "Removing existing service..." -ForegroundColor Yellow
+            Stop-Service $serviceShortName -Force -ErrorAction SilentlyContinue
+            sc.exe delete $serviceShortName
+            Start-Sleep -Seconds 2
+        }
+        
+        # Создаем службу через PowerShell
+        Write-Host "Creating RAS service..." -ForegroundColor Cyan
+        New-Service `
+            -Name $serviceShortName `
+            -BinaryPathName $binary `
+            -DisplayName $serviceDisplayName `
+            -StartupType Automatic `
+            -ErrorAction Stop
+        
+        Write-Host "Service created successfully" -ForegroundColor Green
+        
+        # Запускаем службу
+        Write-Host "Starting RAS service..." -ForegroundColor Yellow
+        Start-Service -Name $serviceShortName -ErrorAction Stop
+        
+        Start-Sleep -Seconds 5
+        
+        # Проверяем статус
+        $service = Get-Service -Name $serviceShortName -ErrorAction SilentlyContinue
+        if($service -and $service.Status -eq "Running") {
+            Write-Host ""
+            Write-Host "RAS service started successfully!" -ForegroundColor Green
+            Write-Host "Service name: $serviceShortName" -ForegroundColor Green
+            Write-Host "Display name: $serviceDisplayName" -ForegroundColor Gray
+            Write-Host "Connected to agent: $agentName`:$ctrlPort" -ForegroundColor Gray
+            
+            $portCheck = netstat -ano | Select-String $rasPort | Select-String "LISTENING"
+            if($portCheck) {
+                Write-Host "Port $rasPort is listening: OK" -ForegroundColor Green
+            } else {
+                Write-Host "Port $rasPort is NOT listening" -ForegroundColor Red
+            }
+        } else {
+            Write-Host "Service created but not running. Status: $($service.Status)" -ForegroundColor Yellow
+        }
+    }
+    catch {
+        Write-Host "Error creating service: $_" -ForegroundColor Red
+    }
+}
+
+function Delete-RASService {
+    $rasServices = Get-RASServices
+    
+    if(-not $rasServices) {
+        Write-Host "No RAS services found" -ForegroundColor Yellow
+        return
+    }
+    
+    Write-Host ""
+    Write-Host "=== УДАЛЕНИЕ RAS СЛУЖБЫ ===" -ForegroundColor Cyan
+    Write-Host "Select RAS service to delete (or 0 to cancel):" -ForegroundColor Yellow
+    
+    $i = 1
+    foreach($svc in $rasServices) {
+        if($svc.Name -match "(\d+)$") {
+            $port = $matches[1]
+        }
+        elseif($svc.DisplayName -match "ras:(\d+)") {
+            $port = $matches[1]
+        }
+        else {
+            $port = "unknown"
+        }
+        
+        Write-Host "$i) $($svc.Name) - Port: $port - Status: $($svc.State)" -ForegroundColor $(if($svc.State -eq "Running"){"Green"}else{"Yellow"})
+        $i++
+    }
+    Write-Host "0) Return to main menu"
+    
+    $choice = Read-Host "Select number"
+    
+    if($choice -eq "0") {
+        Write-Host "Operation cancelled" -ForegroundColor Yellow
+        return
+    }
+    
+    $selectedService = $rasServices[$choice-1]
+    
+    if(-not $selectedService) {
+        Write-Host "Invalid selection"
+        return
+    }
+    
+    $confirm = Read-Host "Delete service '$($selectedService.Name)'? (y/n)"
+    if($confirm -ne 'y') {
+        Write-Host "Deletion cancelled" -ForegroundColor Yellow
+        return
+    }
+    
+    Write-Host "Stopping service..." -ForegroundColor Yellow
+    Stop-Service $selectedService.Name -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 2
+    
+    Write-Host "Deleting service..." -ForegroundColor Yellow
+    sc.exe delete $selectedService.Name 2>$null
+    
+    Write-Host "RAS service deleted successfully" -ForegroundColor Green
+}
+
+# ============================================
 # MAIN MENU
 # ============================================
 
 function Show-MainMenu {
     Clear-Host
-    Write-Host "================================" -ForegroundColor Cyan
-    Write-Host "       1C SERVER MANAGER        " -ForegroundColor White
-    Write-Host "           Version 3.0          " -ForegroundColor White
-    Write-Host "================================" -ForegroundColor Cyan
+    Write-Host "==================================" -ForegroundColor Cyan
+    Write-Host "        1C SERVER MANAGER         " -ForegroundColor White
+    Write-Host "==================================" -ForegroundColor Cyan
     Write-Host ""
-    Write-Host "1 - Show installed platforms"
-    Write-Host "2 - Show 1C services"
-    Write-Host "3 - Show 1C server topology"
-    Write-Host "4 - Restart 1C service"
-    Write-Host "5 - Delete 1C service"
-    Write-Host "6 - Create / Recreate 1C server"
+    Write-Host "=== 1C SERVER SERVICES ===" -ForegroundColor Yellow
+    Write-Host " 1 - Show installed platforms"
+    Write-Host " 2 - Show 1C services"
+    Write-Host " 3 - Show 1C server topology"
+    Write-Host " 4 - Restart 1C service"
+    Write-Host " 5 - Delete 1C service"
+    Write-Host " 6 - Create / Recreate 1C server"
+    Write-Host ""
+    Write-Host "=== RAS SERVICES ===" -ForegroundColor Yellow
+    Write-Host " 7 - Show RAS services"
+    Write-Host " 8 - Create RAS service"
+    Write-Host " 9 - Delete RAS service"
     Write-Host ""
     Write-Host "0 - Exit"
     Write-Host ""
-    Write-Host "================================" -ForegroundColor Cyan
+    Write-Host "==================================" -ForegroundColor Cyan
     Write-Host "At any prompt, enter 0 to cancel" -ForegroundColor Yellow
-    Write-Host "================================" -ForegroundColor Cyan
+    Write-Host "==================================" -ForegroundColor Cyan
 }
 
 # ============================================
@@ -504,6 +805,18 @@ do {
         "6" { 
             Clear-Host
             Create-1CService 
+        }
+        "7" { 
+            Clear-Host
+            Show-RASServices 
+        }
+        "8" { 
+            Clear-Host
+            Create-RASService 
+        }
+        "9" { 
+            Clear-Host
+            Delete-RASService 
         }
         "0" { 
             Clear-Host
