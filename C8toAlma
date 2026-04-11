@@ -10,3 +10,4 @@ chmod +x almalinux-deploy.sh
 
 sudo bash almalinux-deploy.sh -d
 
+cat /etc/os-release
