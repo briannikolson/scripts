@@ -1,6 +1,7 @@
 #!/bin/bash
 # ============================================================================
-# WB Monitor
+# WB Monitor - Финальная установка (скрипт + конфиги + автообновление)
+# Версия: 4.2 Final
 # ============================================================================
 
 set -e
@@ -13,13 +14,13 @@ BLUE='\033[0;34m'
 NC='\033[0m'
 
 echo -e "${GREEN}========================================${NC}"
-echo -e "${GREEN}WB Monitor v4.1 - Финальная установка${NC}"
+echo -e "${GREEN}WB Monitor v4.2 - Финальная установка${NC}"
 echo -e "${GREEN}========================================${NC}"
 
 # ============================================================================
 # 1. ОПРЕДЕЛЕНИЕ ОС
 # ============================================================================
-echo -e "\n${BLUE}[1/6] Определение системы...${NC}"
+echo -e "\n${BLUE}[1/7] Определение системы...${NC}"
 
 detect_os() {
     if [ -f /etc/os-release ]; then
@@ -64,7 +65,7 @@ detect_os
 # ============================================================================
 # 2. УСТАНОВКА ЗАВИСИМОСТЕЙ
 # ============================================================================
-echo -e "\n${BLUE}[2/6] Установка зависимостей...${NC}"
+echo -e "\n${BLUE}[2/7] Установка зависимостей...${NC}"
 
 install_package() {
     local pkg=$1
@@ -89,7 +90,7 @@ install_package "bc"
 # ============================================================================
 # 3. ПОИСК ZABBIX AGENT
 # ============================================================================
-echo -e "\n${BLUE}[3/6] Поиск Zabbix Agent...${NC}"
+echo -e "\n${BLUE}[3/7] Поиск Zabbix Agent...${NC}"
 
 AGENT_PATH=""
 AGENT_TYPE=""
@@ -151,12 +152,12 @@ fi
 # ============================================================================
 # 4. СОЗДАНИЕ СКРИПТА МОНИТОРИНГА
 # ============================================================================
-echo -e "\n${BLUE}[4/6] Создание скрипта мониторинга...${NC}"
+echo -e "\n${BLUE}[4/7] Создание скрипта мониторинга...${NC}"
 
 sudo tee /usr/local/bin/wb_monitor.sh > /dev/null << 'MONITOR_EOF'
 #!/bin/bash
 # ============================================================================
-# WB Monitor v4.1 - Мониторинг Wildberries
+# WB Monitor v4.2 - Мониторинг Wildberries
 # ============================================================================
 
 TARGET="wildberries.ru"
@@ -167,7 +168,6 @@ CURL_CONNECT_TIMEOUT=5
 
 USER_AGENT="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"
 
-# Потери пакетов
 get_packet_loss() {
     local output=$(ping -c "$PING_COUNT" -W "$PING_TIMEOUT" "$TARGET" 2>/dev/null)
     local loss=$(echo "$output" | grep -oE '[0-9]+%' | grep -oE '[0-9]+' | head -1)
@@ -181,7 +181,6 @@ get_packet_loss() {
     echo "$loss"
 }
 
-# Среднее время пинга
 get_ping_time() {
     local times=$(ping -c "$PING_COUNT" -W "$PING_TIMEOUT" "$TARGET" 2>/dev/null | grep -oE 'time=[0-9.]+' | cut -d= -f2)
     if [ -n "$times" ]; then
@@ -191,31 +190,26 @@ get_ping_time() {
     else echo "0"; fi
 }
 
-# Минимальное время пинга
 get_ping_min() {
     local min_time=$(ping -c "$PING_COUNT" -W "$PING_TIMEOUT" "$TARGET" 2>/dev/null | grep -oE 'time=[0-9.]+' | cut -d= -f2 | sort -n | head -1)
     echo "${min_time:-0}"
 }
 
-# Максимальное время пинга
 get_ping_max() {
     local max_time=$(ping -c "$PING_COUNT" -W "$PING_TIMEOUT" "$TARGET" 2>/dev/null | grep -oE 'time=[0-9.]+' | cut -d= -f2 | sort -n | tail -1)
     echo "${max_time:-0}"
 }
 
-# HTTP статус код
 get_http_code() {
     local code=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout "$CURL_CONNECT_TIMEOUT" --max-time "$CURL_TIMEOUT" -A "$USER_AGENT" "https://$TARGET" 2>/dev/null)
     echo ${code:-0}
 }
 
-# HTTP время ответа
 get_http_time() {
     local time_total=$(curl -s -o /dev/null -w "%{time_total}" --connect-timeout "$CURL_CONNECT_TIMEOUT" --max-time "$CURL_TIMEOUT" -A "$USER_AGENT" "https://$TARGET" 2>/dev/null)
     printf "%.3f" "${time_total:-0}"
 }
 
-# Статус
 get_status() {
     local loss=$(get_packet_loss)
     local http_code=$(get_http_code)
@@ -224,12 +218,14 @@ get_status() {
     else echo "PARTIAL"; fi
 }
 
-# Все метрики
+get_version() {
+    echo "4.2"
+}
+
 get_all_metrics() {
     echo "loss=$(get_packet_loss) ping_time=$(get_ping_time) ping_min=$(get_ping_min) ping_max=$(get_ping_max) http_code=$(get_http_code) http_time=$(get_http_time) status=$(get_status)"
 }
 
-# Диспетчер
 case "$1" in
     --loss) get_packet_loss ;;
     --ping-time) get_ping_time ;;
@@ -238,8 +234,9 @@ case "$1" in
     --http-code) get_http_code ;;
     --http-time) get_http_time ;;
     --status) get_status ;;
+    --version) get_version ;;
     --all) get_all_metrics ;;
-    --help) echo "WB Monitor v4.1 - Usage: $0 {--loss|--ping-time|--ping-min|--ping-max|--http-code|--http-time|--status|--all}" ;;
+    --help) echo "WB Monitor v4.2 - Usage: $0 {--loss|--ping-time|--ping-min|--ping-max|--http-code|--http-time|--status|--version|--all}" ;;
     *) exit 1 ;;
 esac
 MONITOR_EOF
@@ -250,15 +247,12 @@ echo -e "${GREEN}✓ Скрипт создан: /usr/local/bin/wb_monitor.sh${NC
 # ============================================================================
 # 5. СОЗДАНИЕ КОНФИГА ZABBIX AGENT
 # ============================================================================
-echo -e "\n${BLUE}[5/6] Создание конфига Zabbix Agent...${NC}"
+echo -e "\n${BLUE}[5/7] Создание конфига Zabbix Agent...${NC}"
 
 CONF_FILE="$AGENT_CONF_DIR/wb_monitor.conf"
 
 sudo tee "$CONF_FILE" > /dev/null << 'CONF_EOF'
-# WB Monitor v4.1 - Конфигурация для Zabbix Agent
-# ============================================================================
-
-# Основные метрики
+# WB Monitor v4.2 - Конфигурация для Zabbix Agent
 UserParameter=wb.loss, /usr/local/bin/wb_monitor.sh --loss
 UserParameter=wb.ping.time, /usr/local/bin/wb_monitor.sh --ping-time
 UserParameter=wb.ping.min, /usr/local/bin/wb_monitor.sh --ping-min
@@ -266,14 +260,90 @@ UserParameter=wb.ping.max, /usr/local/bin/wb_monitor.sh --ping-max
 UserParameter=wb.http.code, /usr/local/bin/wb_monitor.sh --http-code
 UserParameter=wb.http.time, /usr/local/bin/wb_monitor.sh --http-time
 UserParameter=wb.status, /usr/local/bin/wb_monitor.sh --status
+UserParameter=wb.version, /usr/local/bin/wb_monitor.sh --version
 CONF_EOF
 
 echo -e "${GREEN}✓ Конфиг создан: $CONF_FILE${NC}"
 
 # ============================================================================
-# 6. ПЕРЕЗАПУСК И ПРОВЕРКА
+# 6. СОЗДАНИЕ СКРИПТА АВТООБНОВЛЕНИЯ
 # ============================================================================
-echo -e "\n${BLUE}[6/6] Перезапуск и проверка...${NC}"
+echo -e "\n${BLUE}[6/7] Создание скрипта автообновления...${NC}"
+
+sudo tee /usr/local/bin/update_wb_monitor.sh > /dev/null << 'UPDATE_EOF'
+#!/bin/bash
+# WB Monitor - Скрипт автообновления
+
+GITHUB_URL="https://raw.githubusercontent.com/briannikolson/scripts/refs/heads/main/install_wb_monitor"
+LOCAL_SCRIPT="/usr/local/bin/wb_monitor.sh"
+LOG_FILE="/var/log/wb_monitor_update.log"
+
+log() {
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "$LOG_FILE"
+}
+
+# Скачиваем новую версию
+TEMP_SCRIPT="/tmp/wb_monitor_new.sh"
+curl -s "$GITHUB_URL" -o "$TEMP_SCRIPT"
+
+if [ ! -s "$TEMP_SCRIPT" ]; then
+    log "ERROR: Failed to download from GitHub"
+    rm -f "$TEMP_SCRIPT"
+    exit 1
+fi
+
+# Проверяем, есть ли изменения
+if ! cmp -s "$TEMP_SCRIPT" "$LOCAL_SCRIPT"; then
+    log "New version detected, updating..."
+    
+    # Сохраняем старую версию
+    cp "$LOCAL_SCRIPT" "${LOCAL_SCRIPT}.bak"
+    
+    # Копируем новую версию
+    cp "$TEMP_SCRIPT" "$LOCAL_SCRIPT"
+    chmod +x "$LOCAL_SCRIPT"
+    
+    # Перезапускаем Zabbix Agent
+    if systemctl restart zabbix-agent2 2>/dev/null; then
+        log "Zabbix Agent2 restarted successfully"
+    elif systemctl restart zabbix-agent 2>/dev/null; then
+        log "Zabbix Agent restarted successfully"
+    else
+        log "WARNING: Could not restart Zabbix Agent"
+    fi
+    
+    log "Update completed successfully"
+else
+    log "No changes detected"
+fi
+
+rm -f "$TEMP_SCRIPT"
+UPDATE_EOF
+
+sudo chmod +x /usr/local/bin/update_wb_monitor.sh
+echo -e "${GREEN}✓ Скрипт автообновления создан: /usr/local/bin/update_wb_monitor.sh${NC}"
+
+# ============================================================================
+# 7. НАСТРОЙКА АВТООБНОВЛЕНИЯ (CRON)
+# ============================================================================
+echo -e "\n${BLUE}[7/7] Настройка автообновления...${NC}"
+
+# Добавляем задачу в cron (каждые 5 минут)
+if ! crontab -l 2>/dev/null | grep -q "update_wb_monitor.sh"; then
+    (crontab -l 2>/dev/null; echo "*/5 * * * * /usr/local/bin/update_wb_monitor.sh > /dev/null 2>&1") | crontab -
+    echo -e "${GREEN}✓ Добавлена задача в cron (каждые 5 минут)${NC}"
+else
+    echo -e "${GREEN}✓ Задача в cron уже существует${NC}"
+fi
+
+# Создаём лог файл
+touch /var/log/wb_monitor_update.log
+chmod 644 /var/log/wb_monitor_update.log
+
+# ============================================================================
+# ПЕРЕЗАПУСК И ПРОВЕРКА
+# ============================================================================
+echo -e "\n${YELLOW}Перезапуск Zabbix Agent...${NC}"
 
 if systemctl restart "$AGENT_SERVICE" 2>/dev/null; then
     echo -e "${GREEN}✓ Агент перезапущен: systemctl restart $AGENT_SERVICE${NC}"
@@ -301,8 +371,10 @@ if command -v zabbix_get >/dev/null 2>&1; then
     zabbix_get -s 127.0.0.1 -k wb.http.code 2>/dev/null || echo "недоступно"
     echo -n "  wb.status:    "
     zabbix_get -s 127.0.0.1 -k wb.status 2>/dev/null || echo "недоступно"
+    echo -n "  wb.version:   "
+    zabbix_get -s 127.0.0.1 -k wb.version 2>/dev/null || echo "недоступно"
 else
-    echo -e "${YELLOW}⚠ zabbix_get не установлен${NC}"
+    echo -e "${YELLOW}⚠ zabbix_get не установлен (пропускаем)${NC}"
 fi
 
 # ============================================================================
@@ -312,23 +384,20 @@ echo -e "\n${GREEN}========================================${NC}"
 echo -e "${GREEN}УСТАНОВКА ЗАВЕРШЕНА!${NC}"
 echo -e "${GREEN}========================================${NC}"
 echo -e ""
-echo -e "${BLUE}Информация:${NC}"
-echo -e "  Скрипт:   /usr/local/bin/wb_monitor.sh"
-echo -e "  Конфиг:   $CONF_FILE"
-echo -e "  Агент:    $AGENT_TYPE"
-echo -e "  Версия:   $AGENT_VERSION"
-echo -e "  Сервис:   $AGENT_SERVICE"
+echo -e "${BLUE}Установленные компоненты:${NC}"
+echo -e "  📁 Скрипт:        /usr/local/bin/wb_monitor.sh"
+echo -e "  📁 Конфиг:        $CONF_FILE"
+echo -e "  📁 Обновление:    /usr/local/bin/update_wb_monitor.sh"
+echo -e "  📁 Лог:           /var/log/wb_monitor_update.log"
+echo -e "  ⏰ Cron:          */5 * * * * (каждые 5 минут)"
 echo -e ""
 echo -e "${BLUE}Метрики для Zabbix:${NC}"
-echo -e "  wb.loss        - Потери пакетов (%)"
-echo -e "  wb.ping.time   - Среднее время пинга (мс)"
-echo -e "  wb.ping.min    - Минимальное время пинга (мс)"
-echo -e "  wb.ping.max    - Максимальное время пинга (мс)"
-echo -e "  wb.http.code   - HTTP статус код"
-echo -e "  wb.http.time   - Время HTTP ответа (сек)"
-echo -e "  wb.status      - Статус (OK/DOWN/PARTIAL)"
+echo -e "  wb.loss, wb.ping.time, wb.ping.min, wb.ping.max"
+echo -e "  wb.http.code, wb.http.time, wb.status, wb.version"
 echo -e ""
-echo -e "${BLUE}Далее в Zabbix Server:${NC}"
-echo -e "  Создайте шаблон с этими ключами и назначьте на хост"
+echo -e "${BLUE}Управление:${NC}"
+echo -e "  🔄 Ручное обновление: /usr/local/bin/update_wb_monitor.sh"
+echo -e "  📊 Проверка:          /usr/local/bin/wb_monitor.sh --all"
+echo -e "  📋 Лог обновлений:    tail -f /var/log/wb_monitor_update.log"
 echo -e ""
 echo -e "${GREEN}Готово! 🚀${NC}"
