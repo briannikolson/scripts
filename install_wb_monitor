@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================================
-# WB Monitor
+# WB Monitor - Исправленная версия (поддержка zabbix_agent2)
 # ============================================================================
 
 set -e
@@ -24,103 +24,62 @@ AGENT_PATH=""
 AGENT_CONF_DIR=""
 AGENT_SERVICE=""
 
-PATHS=(
-    "/usr/sbin/zabbix_agent2"
-    "/usr/sbin/zabbix_agentd"
-    "/usr/local/sbin/zabbix_agent2"
-    "/usr/local/sbin/zabbix_agentd"
-    "/opt/zabbix/sbin/zabbix_agent2"
-    "/opt/zabbix/sbin/zabbix_agentd"
-)
-
-for p in "${PATHS[@]}"; do
-    if [ -x "$p" ]; then
-        AGENT_PATH="$p"
-        if [[ "$p" == *"agent2"* ]]; then
-            AGENT_TYPE="zabbix_agent2"
-        else
-            AGENT_TYPE="zabbix_agentd"
-        fi
-        echo -e "${GREEN}✓ Найден агент: $AGENT_PATH${NC}"
-        break
-    fi
-done
-
-if [ -z "$AGENT_PATH" ]; then
-    if command -v zabbix_agent2 >/dev/null 2>&1; then
-        AGENT_PATH=$(command -v zabbix_agent2)
-        AGENT_TYPE="zabbix_agent2"
-        echo -e "${GREEN}✓ Найден агент: $AGENT_PATH${NC}"
-    elif command -v zabbix_agentd >/dev/null 2>&1; then
-        AGENT_PATH=$(command -v zabbix_agentd)
-        AGENT_TYPE="zabbix_agentd"
-        echo -e "${GREEN}✓ Найден агент: $AGENT_PATH${NC}"
-    fi
-fi
-
-if [ -z "$AGENT_PATH" ]; then
+# Ищем сначала agent2, потом agentd
+if [ -x "/usr/sbin/zabbix_agent2" ]; then
+    AGENT_PATH="/usr/sbin/zabbix_agent2"
+    AGENT_TYPE="zabbix_agent2"
+    AGENT_SERVICE="zabbix-agent2"
+    echo -e "${GREEN}✓ Найден агент: $AGENT_PATH${NC}"
+elif [ -x "/usr/sbin/zabbix_agentd" ]; then
+    AGENT_PATH="/usr/sbin/zabbix_agentd"
+    AGENT_TYPE="zabbix_agentd"
+    AGENT_SERVICE="zabbix-agent"
+    echo -e "${GREEN}✓ Найден агент: $AGENT_PATH${NC}"
+elif command -v zabbix_agent2 >/dev/null 2>&1; then
+    AGENT_PATH=$(command -v zabbix_agent2)
+    AGENT_TYPE="zabbix_agent2"
+    AGENT_SERVICE="zabbix-agent2"
+    echo -e "${GREEN}✓ Найден агент: $AGENT_PATH${NC}"
+elif command -v zabbix_agentd >/dev/null 2>&1; then
+    AGENT_PATH=$(command -v zabbix_agentd)
+    AGENT_TYPE="zabbix_agentd"
+    AGENT_SERVICE="zabbix-agent"
+    echo -e "${GREEN}✓ Найден агент: $AGENT_PATH${NC}"
+else
     echo -e "${RED}✗ Zabbix Agent не найден на этой VPS${NC}"
     exit 1
 fi
 
 AGENT_VERSION=$($AGENT_PATH --version 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
 echo -e "${GREEN}✓ Версия агента: $AGENT_VERSION${NC}"
+echo -e "${GREEN}✓ Сервис: $AGENT_SERVICE${NC}"
 
 # ============================================================================
-# 2. ОПРЕДЕЛЕНИЕ ПРАВИЛЬНОГО СЕРВИСА
+# 2. ПОИСК ДИРЕКТОРИИ КОНФИГОВ
 # ============================================================================
-echo -e "\n${YELLOW}[2/6] Определение сервиса Zabbix Agent...${NC}"
-
-# Правильное имя сервиса в зависимости от типа агента
-if [ "$AGENT_TYPE" = "zabbix_agent2" ]; then
-    AGENT_SERVICE="zabbix-agent2"
-else
-    AGENT_SERVICE="zabbix-agent"
-fi
-
-# Проверяем, существует ли сервис
-if systemctl list-units --type=service | grep -q "${AGENT_SERVICE}.service"; then
-    echo -e "${GREEN}✓ Найден сервис: ${AGENT_SERVICE}.service${NC}"
-else
-    # Пробуем альтернативные имена
-    for alt_svc in zabbix_agentd zabbix-agent zabbix-agent2; do
-        if systemctl list-units --type=service | grep -q "${alt_svc}.service"; then
-            AGENT_SERVICE="$alt_svc"
-            echo -e "${GREEN}✓ Найден альтернативный сервис: ${AGENT_SERVICE}.service${NC}"
-            break
-        fi
-    done
-fi
-
-# ============================================================================
-# 3. ПОИСК ДИРЕКТОРИИ КОНФИГОВ
-# ============================================================================
-echo -e "\n${YELLOW}[3/6] Поиск директории конфигов...${NC}"
+echo -e "\n${YELLOW}[2/6] Поиск директории конфигов...${NC}"
 
 if [ "$AGENT_TYPE" = "zabbix_agent2" ]; then
-    CONF_DIRS=("/etc/zabbix/zabbix_agent2.d" "/etc/zabbix/zabbix_agentd.d")
-else
-    CONF_DIRS=("/etc/zabbix/zabbix_agentd.d" "/etc/zabbix/zabbix_agent2.d")
-fi
-
-for dir in "${CONF_DIRS[@]}"; do
-    if [ -d "$dir" ]; then
-        AGENT_CONF_DIR="$dir"
-        echo -e "${GREEN}✓ Найдена конфигурация: $AGENT_CONF_DIR${NC}"
-        break
+    if [ -d "/etc/zabbix/zabbix_agent2.d" ]; then
+        AGENT_CONF_DIR="/etc/zabbix/zabbix_agent2.d"
+    else
+        AGENT_CONF_DIR="/etc/zabbix/zabbix_agentd.d"
     fi
-done
-
-if [ -z "$AGENT_CONF_DIR" ]; then
-    AGENT_CONF_DIR="/etc/zabbix/zabbix_agentd.d"
-    mkdir -p "$AGENT_CONF_DIR"
-    echo -e "${YELLOW}✓ Создана директория: $AGENT_CONF_DIR${NC}"
+else
+    if [ -d "/etc/zabbix/zabbix_agentd.d" ]; then
+        AGENT_CONF_DIR="/etc/zabbix/zabbix_agentd.d"
+    else
+        AGENT_CONF_DIR="/etc/zabbix/zabbix_agent2.d"
+    fi
 fi
 
+mkdir -p "$AGENT_CONF_DIR"
+echo -e "${GREEN}✓ Директория конфигов: $AGENT_CONF_DIR${NC}"
+
 # ============================================================================
-# 4. СОЗДАНИЕ СКРИПТА МОНИТОРИНГА
+# 3. СОЗДАНИЕ СКРИПТА МОНИТОРИНГА
 # ============================================================================
-echo -e "\n${YELLOW}[4/6] Создание скрипта мониторинга...${NC}"
+echo -e "\n${YELLOW}[3/6] Создание скрипта мониторинга...${NC}"
 
 cat > /usr/local/bin/wb_monitor.sh << 'MONITOR_EOF'
 #!/bin/bash
@@ -170,9 +129,9 @@ chmod +x /usr/local/bin/wb_monitor.sh
 echo -e "${GREEN}✓ Скрипт создан: /usr/local/bin/wb_monitor.sh${NC}"
 
 # ============================================================================
-# 5. НАСТРОЙКА ZABBIX AGENT
+# 4. НАСТРОЙКА ZABBIX AGENT
 # ============================================================================
-echo -e "\n${YELLOW}[5/6] Настройка Zabbix Agent...${NC}"
+echo -e "\n${YELLOW}[4/6] Настройка Zabbix Agent...${NC}"
 
 CONF_FILE="$AGENT_CONF_DIR/wb_monitor.conf"
 
@@ -186,29 +145,23 @@ CONF_EOF
 echo -e "${GREEN}✓ Конфиг создан: $CONF_FILE${NC}"
 
 # ============================================================================
-# 6. ПЕРЕЗАПУСК АГЕНТА
+# 5. ПЕРЕЗАПУСК АГЕНТА (ПРАВИЛЬНЫЙ СЕРВИС)
 # ============================================================================
-echo -e "\n${YELLOW}[6/6] Перезапуск Zabbix Agent...${NC}"
+echo -e "\n${YELLOW}[5/6] Перезапуск Zabbix Agent...${NC}"
 
 if systemctl restart "$AGENT_SERVICE" 2>/dev/null; then
     echo -e "${GREEN}✓ Агент перезапущен: systemctl restart $AGENT_SERVICE${NC}"
 else
-    # Пробуем альтернативные имена
-    for alt in zabbix-agent2 zabbix-agent zabbix_agentd; do
-        if systemctl restart "$alt" 2>/dev/null; then
-            echo -e "${GREEN}✓ Агент перезапущен: systemctl restart $alt${NC}"
-            AGENT_SERVICE="$alt"
-            break
-        fi
-    done
+    echo -e "${YELLOW}⚠ Не удалось перезапустить $AGENT_SERVICE${NC}"
+    echo -e "${YELLOW}Попробуйте выполнить вручную: systemctl restart $AGENT_SERVICE${NC}"
 fi
 
 sleep 2
 
 # ============================================================================
-# 7. ПРОВЕРКА
+# 6. ПРОВЕРКА
 # ============================================================================
-echo -e "\n${YELLOW}Проверка работоспособности...${NC}"
+echo -e "\n${YELLOW}[6/6] Проверка работоспособности...${NC}"
 echo -e "\n${YELLOW}Результаты мониторинга:${NC}"
 /usr/local/bin/wb_monitor.sh --all
 
