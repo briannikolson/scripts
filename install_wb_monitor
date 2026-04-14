@@ -1,9 +1,168 @@
-# Создать и настроить скрипт
-sudo tee /usr/local/bin/wb_monitor.sh > /dev/null << 'SCRIPT_EOF'
 #!/bin/bash
 # ============================================================================
-# WB Monitor - Финальная версия 4.0
+# WB Monitor - Единый скрипт установки и настройки
+# Версия: 4.0 Final
 # ============================================================================
+
+set -e
+
+# Цвета для вывода
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m'
+
+echo -e "${GREEN}========================================${NC}"
+echo -e "${GREEN}WB Monitor - Единая установка${NC}"
+echo -e "${GREEN}Версия 4.0 Final${NC}"
+echo -e "${GREEN}========================================${NC}"
+
+# ============================================================================
+# 1. ОПРЕДЕЛЕНИЕ ОС И МЕНЕДЖЕРА ПАКЕТОВ
+# ============================================================================
+echo -e "\n${BLUE}[1/7] Определение операционной системы...${NC}"
+
+detect_os() {
+    if [ -f /etc/os-release ]; then
+        . /etc/os-release
+        OS=$ID
+    else
+        OS=$(uname -s)
+    fi
+    
+    case $OS in
+        ubuntu|debian)
+            PKG_MANAGER="apt"
+            INSTALL_CMD="apt update && apt install -y"
+            ;;
+        centos|rhel|rocky|almalinux|fedora)
+            PKG_MANAGER="yum"
+            INSTALL_CMD="yum install -y"
+            if command -v dnf >/dev/null 2>&1; then
+                PKG_MANAGER="dnf"
+                INSTALL_CMD="dnf install -y"
+            fi
+            ;;
+        alpine)
+            PKG_MANAGER="apk"
+            INSTALL_CMD="apk add"
+            ;;
+        arch)
+            PKG_MANAGER="pacman"
+            INSTALL_CMD="pacman -S --noconfirm"
+            ;;
+        *)
+            PKG_MANAGER="unknown"
+            INSTALL_CMD=""
+            ;;
+    esac
+    
+    echo -e "${GREEN}✓ ОС: $OS${NC}"
+    echo -e "${GREEN}✓ Менеджер пакетов: $PKG_MANAGER${NC}"
+}
+
+detect_os
+
+# ============================================================================
+# 2. УСТАНОВКА ЗАВИСИМОСТЕЙ
+# ============================================================================
+echo -e "\n${BLUE}[2/7] Установка зависимостей...${NC}"
+
+install_package() {
+    local pkg=$1
+    if ! command -v $pkg >/dev/null 2>&1; then
+        echo -e "${YELLOW}⚠ Установка $pkg...${NC}"
+        case $PKG_MANAGER in
+            apt) apt update && apt install -y $pkg ;;
+            yum|dnf) $INSTALL_CMD $pkg ;;
+            apk) $INSTALL_CMD $pkg ;;
+            pacman) $INSTALL_CMD $pkg ;;
+            *) echo -e "${RED}✗ Не удалось установить $pkg${NC}" ;;
+        esac
+        echo -e "${GREEN}✓ $pkg установлен${NC}"
+    else
+        echo -e "${GREEN}✓ $pkg уже установлен${NC}"
+    fi
+}
+
+install_package "curl"
+install_package "bc"
+
+# ============================================================================
+# 3. ПОИСК ZABBIX AGENT
+# ============================================================================
+echo -e "\n${BLUE}[3/7] Поиск Zabbix Agent...${NC}"
+
+AGENT_PATH=""
+AGENT_TYPE=""
+AGENT_SERVICE=""
+AGENT_CONF_DIR=""
+
+# Поиск пути к агенту
+for p in /usr/sbin/zabbix_agent2 /usr/sbin/zabbix_agentd /usr/local/sbin/zabbix_agent2 /usr/local/sbin/zabbix_agentd; do
+    if [ -x "$p" ]; then
+        AGENT_PATH="$p"
+        if [[ "$p" == *"agent2"* ]]; then
+            AGENT_TYPE="zabbix_agent2"
+            AGENT_SERVICE="zabbix-agent2"
+        else
+            AGENT_TYPE="zabbix_agentd"
+            AGENT_SERVICE="zabbix-agent"
+        fi
+        echo -e "${GREEN}✓ Найден агент: $AGENT_PATH${NC}"
+        break
+    fi
+done
+
+if [ -z "$AGENT_PATH" ]; then
+    if command -v zabbix_agent2 >/dev/null 2>&1; then
+        AGENT_PATH=$(command -v zabbix_agent2)
+        AGENT_TYPE="zabbix_agent2"
+        AGENT_SERVICE="zabbix-agent2"
+        echo -e "${GREEN}✓ Найден агент: $AGENT_PATH${NC}"
+    elif command -v zabbix_agentd >/dev/null 2>&1; then
+        AGENT_PATH=$(command -v zabbix_agentd)
+        AGENT_TYPE="zabbix_agentd"
+        AGENT_SERVICE="zabbix-agent"
+        echo -e "${GREEN}✓ Найден агент: $AGENT_PATH${NC}"
+    fi
+fi
+
+if [ -z "$AGENT_PATH" ]; then
+    echo -e "${RED}✗ Zabbix Agent не найден${NC}"
+    echo -e "${YELLOW}Установите Zabbix Agent и запустите скрипт снова${NC}"
+    exit 1
+fi
+
+# Версия агента
+AGENT_VERSION=$($AGENT_PATH --version 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+echo -e "${GREEN}✓ Версия агента: $AGENT_VERSION${NC}"
+echo -e "${GREEN}✓ Сервис: $AGENT_SERVICE${NC}"
+
+# Поиск директории конфигов
+for dir in /etc/zabbix/zabbix_agent2.d /etc/zabbix/zabbix_agentd.d /usr/local/etc/zabbix_agentd.d; do
+    if [ -d "$dir" ]; then
+        AGENT_CONF_DIR="$dir"
+        echo -e "${GREEN}✓ Директория конфигов: $AGENT_CONF_DIR${NC}"
+        break
+    fi
+done
+
+if [ -z "$AGENT_CONF_DIR" ]; then
+    AGENT_CONF_DIR="/etc/zabbix/zabbix_agentd.d"
+    mkdir -p "$AGENT_CONF_DIR"
+    echo -e "${YELLOW}✓ Создана директория: $AGENT_CONF_DIR${NC}"
+fi
+
+# ============================================================================
+# 4. СОЗДАНИЕ СКРИПТА МОНИТОРИНГА
+# ============================================================================
+echo -e "\n${BLUE}[4/7] Создание скрипта мониторинга...${NC}"
+
+sudo tee /usr/local/bin/wb_monitor.sh > /dev/null << 'MONITOR_EOF'
+#!/bin/bash
+# WB Monitor - Финальная версия 4.0
 
 TARGET="wildberries.ru"
 PING_COUNT=10
@@ -12,8 +171,16 @@ CURL_TIMEOUT=10
 CURL_CONNECT_TIMEOUT=5
 
 get_packet_loss() {
-    local loss=$(ping -c "$PING_COUNT" -W "$PING_TIMEOUT" "$TARGET" 2>/dev/null | grep -oE '[0-9]+(?=% packet loss)' | head -1)
-    echo ${loss:-100}
+    local output=$(ping -c "$PING_COUNT" -W "$PING_TIMEOUT" "$TARGET" 2>/dev/null)
+    local loss=$(echo "$output" | grep -oE '[0-9]+%' | grep -oE '[0-9]+' | head -1)
+    if [ -z "$loss" ]; then
+        if echo "$output" | grep -q "bytes from"; then
+            loss="0"
+        else
+            loss="100"
+        fi
+    fi
+    echo "$loss"
 }
 
 get_ping_time() {
@@ -46,14 +213,14 @@ get_http_time() {
 }
 
 get_status() {
-    local loss=$(get_packet_loss); local http_code=$(get_http_code)
-    if [ "$loss" -lt 100 ] && [ "$http_code" != "0" ]; then echo "OK"
-    elif [ "$loss" -eq 100 ] && [ "$http_code" = "0" ]; then echo "DOWN"
-    elif [ "$loss" -lt 100 ] && [ "$http_code" = "0" ]; then echo "DEGRADED"
-    else echo "UNKNOWN"; fi
+    local loss=$(get_packet_loss)
+    local http_code=$(get_http_code)
+    if [ "$loss" = "0" ] && [ "$http_code" != "0" ]; then echo "OK"
+    elif [ "$loss" = "100" ] && [ "$http_code" = "0" ]; then echo "DOWN"
+    else echo "PARTIAL"; fi
 }
 
-get_all_metrics_oneline() {
+get_all_metrics() {
     echo "loss=$(get_packet_loss) ping_time=$(get_ping_time) ping_min=$(get_ping_min) ping_max=$(get_ping_max) http_code=$(get_http_code) http_time=$(get_http_time) status=$(get_status)"
 }
 
@@ -65,15 +232,99 @@ case "$1" in
     --http-code) get_http_code ;;
     --http-time) get_http_time ;;
     --status) get_status ;;
-    --all) get_all_metrics_oneline ;;
-    --help|-h) echo "Usage: $0 {--loss|--ping-time|--ping-min|--ping-max|--http-code|--http-time|--status|--all}" ;;
-    *) echo "Usage: $0 {--loss|--ping-time|--http-code|--http-time|--all}" ;;
+    --all) get_all_metrics ;;
+    --help) echo "Usage: $0 {--loss|--ping-time|--ping-min|--ping-max|--http-code|--http-time|--status|--all}" ;;
+    *) exit 1 ;;
 esac
-SCRIPT_EOF
+MONITOR_EOF
 
-# Дать права на выполнение
 sudo chmod +x /usr/local/bin/wb_monitor.sh
+echo -e "${GREEN}✓ Скрипт создан: /usr/local/bin/wb_monitor.sh${NC}"
 
-# Проверить работу
-echo "=== Проверка скрипта ==="
+# ============================================================================
+# 5. НАСТРОЙКА ZABBIX AGENT
+# ============================================================================
+echo -e "\n${BLUE}[5/7] Настройка Zabbix Agent...${NC}"
+
+CONF_FILE="$AGENT_CONF_DIR/wb_monitor.conf"
+
+sudo tee "$CONF_FILE" > /dev/null << 'CONF_EOF'
+UserParameter=wb.loss, /usr/local/bin/wb_monitor.sh --loss
+UserParameter=wb.ping.time, /usr/local/bin/wb_monitor.sh --ping-time
+UserParameter=wb.ping.min, /usr/local/bin/wb_monitor.sh --ping-min
+UserParameter=wb.ping.max, /usr/local/bin/wb_monitor.sh --ping-max
+UserParameter=wb.http.code, /usr/local/bin/wb_monitor.sh --http-code
+UserParameter=wb.http.time, /usr/local/bin/wb_monitor.sh --http-time
+UserParameter=wb.status, /usr/local/bin/wb_monitor.sh --status
+CONF_EOF
+
+echo -e "${GREEN}✓ Конфиг создан: $CONF_FILE${NC}"
+
+# ============================================================================
+# 6. ПЕРЕЗАПУСК ZABBIX AGENT
+# ============================================================================
+echo -e "\n${BLUE}[6/7] Перезапуск Zabbix Agent...${NC}"
+
+if systemctl restart "$AGENT_SERVICE" 2>/dev/null; then
+    echo -e "${GREEN}✓ Агент перезапущен: systemctl restart $AGENT_SERVICE${NC}"
+else
+    for alt in zabbix-agent2 zabbix-agent zabbix_agentd; do
+        if systemctl restart "$alt" 2>/dev/null; then
+            echo -e "${GREEN}✓ Агент перезапущен: systemctl restart $alt${NC}"
+            break
+        fi
+    done
+fi
+
+sleep 2
+
+# ============================================================================
+# 7. ПРОВЕРКА РАБОТОСПОСОБНОСТИ
+# ============================================================================
+echo -e "\n${BLUE}[7/7] Проверка работоспособности...${NC}"
+
+echo -e "\n${YELLOW}Результаты мониторинга:${NC}"
 /usr/local/bin/wb_monitor.sh --all
+
+echo -e "\n${YELLOW}Проверка через Zabbix Agent:${NC}"
+if command -v zabbix_get >/dev/null 2>&1; then
+    echo -n "  wb.loss:      "
+    zabbix_get -s 127.0.0.1 -k wb.loss 2>/dev/null || echo "недоступно"
+    echo -n "  wb.ping.time: "
+    zabbix_get -s 127.0.0.1 -k wb.ping.time 2>/dev/null || echo "недоступно"
+    echo -n "  wb.http.code: "
+    zabbix_get -s 127.0.0.1 -k wb.http.code 2>/dev/null || echo "недоступно"
+    echo -n "  wb.status:    "
+    zabbix_get -s 127.0.0.1 -k wb.status 2>/dev/null || echo "недоступно"
+else
+    echo -e "${YELLOW}⚠ zabbix_get не установлен (пропускаем)${NC}"
+fi
+
+# ============================================================================
+# ИТОГОВАЯ ИНФОРМАЦИЯ
+# ============================================================================
+echo -e "\n${GREEN}========================================${NC}"
+echo -e "${GREEN}УСТАНОВКА ЗАВЕРШЕНА!${NC}"
+echo -e "${GREEN}========================================${NC}"
+echo -e ""
+echo -e "${BLUE}Информация:${NC}"
+echo -e "  Агент:     $AGENT_TYPE"
+echo -e "  Версия:    $AGENT_VERSION"
+echo -e "  Сервис:    $AGENT_SERVICE"
+echo -e "  Конфиг:    $CONF_FILE"
+echo -e ""
+echo -e "${BLUE}Метрики для Zabbix:${NC}"
+echo -e "  wb.loss        - Потери пакетов (%)"
+echo -e "  wb.ping.time   - Среднее время пинга (мс)"
+echo -e "  wb.ping.min    - Минимальное время пинга (мс)"
+echo -e "  wb.ping.max    - Максимальное время пинга (мс)"
+echo -e "  wb.http.code   - HTTP статус код"
+echo -e "  wb.http.time   - Время HTTP ответа (сек)"
+echo -e "  wb.status      - Статус (OK/DOWN/PARTIAL)"
+echo -e ""
+echo -e "${BLUE}Далее в Zabbix Server:${NC}"
+echo -e "  1. Создайте шаблон с этими ключами"
+echo -e "  2. Назначьте шаблон на хост этой VPS"
+echo -e "  3. Ждите данные через 1-2 минуты"
+echo -e ""
+echo -e "${GREEN}Готово! 🚀${NC}"
