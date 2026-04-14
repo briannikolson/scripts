@@ -1,24 +1,176 @@
 #!/bin/bash
 # ============================================================================
-# WB Monitor - Финальная версия 4.1
-# Мониторинг Wildberries через ICMP ping и HTTP/HTTPS с User-Agent
+# WB Monitor
 # ============================================================================
 
-# ===== НАСТРОЙКИ ============================================================
+set -e
+
+# Цвета
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m'
+
+echo -e "${GREEN}========================================${NC}"
+echo -e "${GREEN}WB Monitor v4.1 - Финальная установка${NC}"
+echo -e "${GREEN}========================================${NC}"
+
+# ============================================================================
+# 1. ОПРЕДЕЛЕНИЕ ОС
+# ============================================================================
+echo -e "\n${BLUE}[1/6] Определение системы...${NC}"
+
+detect_os() {
+    if [ -f /etc/os-release ]; then
+        . /etc/os-release
+        OS=$ID
+    else
+        OS=$(uname -s)
+    fi
+    
+    case $OS in
+        ubuntu|debian)
+            PKG_MANAGER="apt"
+            INSTALL_CMD="apt update && apt install -y"
+            ;;
+        centos|rhel|rocky|almalinux|fedora)
+            PKG_MANAGER="yum"
+            INSTALL_CMD="yum install -y"
+            if command -v dnf >/dev/null 2>&1; then
+                PKG_MANAGER="dnf"
+                INSTALL_CMD="dnf install -y"
+            fi
+            ;;
+        alpine)
+            PKG_MANAGER="apk"
+            INSTALL_CMD="apk add"
+            ;;
+        arch)
+            PKG_MANAGER="pacman"
+            INSTALL_CMD="pacman -S --noconfirm"
+            ;;
+        *)
+            PKG_MANAGER="unknown"
+            INSTALL_CMD=""
+            ;;
+    esac
+    echo -e "${GREEN}✓ ОС: $OS${NC}"
+    echo -e "${GREEN}✓ Менеджер пакетов: $PKG_MANAGER${NC}"
+}
+
+detect_os
+
+# ============================================================================
+# 2. УСТАНОВКА ЗАВИСИМОСТЕЙ
+# ============================================================================
+echo -e "\n${BLUE}[2/6] Установка зависимостей...${NC}"
+
+install_package() {
+    local pkg=$1
+    if ! command -v $pkg >/dev/null 2>&1; then
+        echo -e "${YELLOW}⚠ Установка $pkg...${NC}"
+        case $PKG_MANAGER in
+            apt) apt update && apt install -y $pkg ;;
+            yum|dnf) $INSTALL_CMD $pkg ;;
+            apk) $INSTALL_CMD $pkg ;;
+            pacman) $INSTALL_CMD $pkg ;;
+            *) echo -e "${RED}✗ Не удалось установить $pkg${NC}" ;;
+        esac
+        echo -e "${GREEN}✓ $pkg установлен${NC}"
+    else
+        echo -e "${GREEN}✓ $pkg уже установлен${NC}"
+    fi
+}
+
+install_package "curl"
+install_package "bc"
+
+# ============================================================================
+# 3. ПОИСК ZABBIX AGENT
+# ============================================================================
+echo -e "\n${BLUE}[3/6] Поиск Zabbix Agent...${NC}"
+
+AGENT_PATH=""
+AGENT_TYPE=""
+AGENT_SERVICE=""
+AGENT_CONF_DIR=""
+
+for p in /usr/sbin/zabbix_agent2 /usr/sbin/zabbix_agentd /usr/local/sbin/zabbix_agent2 /usr/local/sbin/zabbix_agentd; do
+    if [ -x "$p" ]; then
+        AGENT_PATH="$p"
+        if [[ "$p" == *"agent2"* ]]; then
+            AGENT_TYPE="zabbix_agent2"
+            AGENT_SERVICE="zabbix-agent2"
+        else
+            AGENT_TYPE="zabbix_agentd"
+            AGENT_SERVICE="zabbix-agent"
+        fi
+        echo -e "${GREEN}✓ Найден агент: $AGENT_PATH${NC}"
+        break
+    fi
+done
+
+if [ -z "$AGENT_PATH" ]; then
+    if command -v zabbix_agent2 >/dev/null 2>&1; then
+        AGENT_PATH=$(command -v zabbix_agent2)
+        AGENT_TYPE="zabbix_agent2"
+        AGENT_SERVICE="zabbix-agent2"
+        echo -e "${GREEN}✓ Найден агент: $AGENT_PATH${NC}"
+    elif command -v zabbix_agentd >/dev/null 2>&1; then
+        AGENT_PATH=$(command -v zabbix_agentd)
+        AGENT_TYPE="zabbix_agentd"
+        AGENT_SERVICE="zabbix-agent"
+        echo -e "${GREEN}✓ Найден агент: $AGENT_PATH${NC}"
+    fi
+fi
+
+if [ -z "$AGENT_PATH" ]; then
+    echo -e "${RED}✗ Zabbix Agent не найден${NC}"
+    exit 1
+fi
+
+AGENT_VERSION=$($AGENT_PATH --version 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+echo -e "${GREEN}✓ Версия агента: $AGENT_VERSION${NC}"
+echo -e "${GREEN}✓ Сервис: $AGENT_SERVICE${NC}"
+
+for dir in /etc/zabbix/zabbix_agent2.d /etc/zabbix/zabbix_agentd.d /usr/local/etc/zabbix_agentd.d; do
+    if [ -d "$dir" ]; then
+        AGENT_CONF_DIR="$dir"
+        echo -e "${GREEN}✓ Директория конфигов: $AGENT_CONF_DIR${NC}"
+        break
+    fi
+done
+
+if [ -z "$AGENT_CONF_DIR" ]; then
+    AGENT_CONF_DIR="/etc/zabbix/zabbix_agentd.d"
+    mkdir -p "$AGENT_CONF_DIR"
+    echo -e "${YELLOW}✓ Создана директория: $AGENT_CONF_DIR${NC}"
+fi
+
+# ============================================================================
+# 4. СОЗДАНИЕ СКРИПТА МОНИТОРИНГА
+# ============================================================================
+echo -e "\n${BLUE}[4/6] Создание скрипта мониторинга...${NC}"
+
+sudo tee /usr/local/bin/wb_monitor.sh > /dev/null << 'MONITOR_EOF'
+#!/bin/bash
+# ============================================================================
+# WB Monitor v4.1 - Мониторинг Wildberries
+# ============================================================================
+
 TARGET="wildberries.ru"
 PING_COUNT=10
 PING_TIMEOUT=2
 CURL_TIMEOUT=10
 CURL_CONNECT_TIMEOUT=5
 
-# User-Agent для эмуляции реального браузера
 USER_AGENT="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"
 
-# ===== ФУНКЦИЯ: ПОТЕРИ ПАКЕТОВ (ICMP) ========================================
+# Потери пакетов
 get_packet_loss() {
     local output=$(ping -c "$PING_COUNT" -W "$PING_TIMEOUT" "$TARGET" 2>/dev/null)
     local loss=$(echo "$output" | grep -oE '[0-9]+%' | grep -oE '[0-9]+' | head -1)
-    
     if [ -z "$loss" ]; then
         if echo "$output" | grep -q "bytes from"; then
             loss="0"
@@ -29,149 +181,154 @@ get_packet_loss() {
     echo "$loss"
 }
 
-# ===== ФУНКЦИЯ: СРЕДНЕЕ ВРЕМЯ ПИНГА ==========================================
+# Среднее время пинга
 get_ping_time() {
     local times=$(ping -c "$PING_COUNT" -W "$PING_TIMEOUT" "$TARGET" 2>/dev/null | grep -oE 'time=[0-9.]+' | cut -d= -f2)
-    
     if [ -n "$times" ]; then
-        local sum=0
-        local count=0
-        for t in $times; do
-            sum=$(echo "$sum + $t" | bc)
-            count=$((count + 1))
-        done
-        if [ $count -gt 0 ]; then
-            printf "%.2f" "$(echo "scale=2; $sum / $count" | bc)"
-        else
-            echo "0"
-        fi
-    else
-        echo "0"
-    fi
+        local sum=0; local count=0
+        for t in $times; do sum=$(echo "$sum + $t" | bc); count=$((count + 1)); done
+        if [ $count -gt 0 ]; then printf "%.2f" "$(echo "scale=2; $sum / $count" | bc)"; else echo "0"; fi
+    else echo "0"; fi
 }
 
-# ===== ФУНКЦИЯ: МИНИМАЛЬНОЕ ВРЕМЯ ПИНГА =======================================
+# Минимальное время пинга
 get_ping_min() {
     local min_time=$(ping -c "$PING_COUNT" -W "$PING_TIMEOUT" "$TARGET" 2>/dev/null | grep -oE 'time=[0-9.]+' | cut -d= -f2 | sort -n | head -1)
     echo "${min_time:-0}"
 }
 
-# ===== ФУНКЦИЯ: МАКСИМАЛЬНОЕ ВРЕМЯ ПИНГА =======================================
+# Максимальное время пинга
 get_ping_max() {
     local max_time=$(ping -c "$PING_COUNT" -W "$PING_TIMEOUT" "$TARGET" 2>/dev/null | grep -oE 'time=[0-9.]+' | cut -d= -f2 | sort -n | tail -1)
     echo "${max_time:-0}"
 }
 
-# ===== ФУНКЦИЯ: HTTP СТАТУС КОД (с User-Agent) ================================
+# HTTP статус код
 get_http_code() {
-    local code=$(curl -s -o /dev/null -w "%{http_code}" \
-        --connect-timeout "$CURL_CONNECT_TIMEOUT" \
-        --max-time "$CURL_TIMEOUT" \
-        -A "$USER_AGENT" \
-        "https://$TARGET" 2>/dev/null)
-    
-    if [ -n "$code" ] && [ "$code" -gt 0 ] 2>/dev/null; then
-        echo "$code"
-    else
-        echo "0"
-    fi
+    local code=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout "$CURL_CONNECT_TIMEOUT" --max-time "$CURL_TIMEOUT" -A "$USER_AGENT" "https://$TARGET" 2>/dev/null)
+    echo ${code:-0}
 }
 
-# ===== ФУНКЦИЯ: HTTP ВРЕМЯ ОТВЕТА (с User-Agent) ==============================
+# HTTP время ответа
 get_http_time() {
-    local time_total=$(curl -s -o /dev/null -w "%{time_total}" \
-        --connect-timeout "$CURL_CONNECT_TIMEOUT" \
-        --max-time "$CURL_TIMEOUT" \
-        -A "$USER_AGENT" \
-        "https://$TARGET" 2>/dev/null)
-    
-    if [ -n "$time_total" ] && [ "$time_total" != "0" ]; then
-        printf "%.3f" "$time_total"
-    else
-        echo "0"
-    fi
+    local time_total=$(curl -s -o /dev/null -w "%{time_total}" --connect-timeout "$CURL_CONNECT_TIMEOUT" --max-time "$CURL_TIMEOUT" -A "$USER_AGENT" "https://$TARGET" 2>/dev/null)
+    printf "%.3f" "${time_total:-0}"
 }
 
-# ===== ФУНКЦИЯ: СТАТУС =======================================================
+# Статус
 get_status() {
     local loss=$(get_packet_loss)
     local http_code=$(get_http_code)
-    
-    if [ "$loss" = "0" ] && [ "$http_code" != "0" ]; then
-        echo "OK"
-    elif [ "$loss" = "100" ] && [ "$http_code" = "0" ]; then
-        echo "DOWN"
-    elif [ "$loss" != "100" ] && [ "$http_code" = "0" ]; then
-        echo "HTTP_ERROR"
-    else
-        echo "PARTIAL"
-    fi
+    if [ "$loss" = "0" ] && [ "$http_code" != "0" ]; then echo "OK"
+    elif [ "$loss" = "100" ] && [ "$http_code" = "0" ]; then echo "DOWN"
+    else echo "PARTIAL"; fi
 }
 
-# ===== ФУНКЦИЯ: ВСЕ МЕТРИКИ В ОДНУ СТРОКУ ======================================
+# Все метрики
 get_all_metrics() {
-    local loss=$(get_packet_loss)
-    local ping_time=$(get_ping_time)
-    local ping_min=$(get_ping_min)
-    local ping_max=$(get_ping_max)
-    local http_code=$(get_http_code)
-    local http_time=$(get_http_time)
-    local status=$(get_status)
-    
-    echo "loss=$loss ping_time=$ping_time ping_min=$ping_min ping_max=$ping_max http_code=$http_code http_time=$http_time status=$status"
+    echo "loss=$(get_packet_loss) ping_time=$(get_ping_time) ping_min=$(get_ping_min) ping_max=$(get_ping_max) http_code=$(get_http_code) http_time=$(get_http_time) status=$(get_status)"
 }
 
-# ===== ФУНКЦИЯ: ВСЕ МЕТРИКИ (МНОГОСТРОЧНЫЙ ВЫВОД) ==============================
-get_all_metrics_multi() {
-    echo "loss=$(get_packet_loss)"
-    echo "ping_time=$(get_ping_time)"
-    echo "ping_min=$(get_ping_min)"
-    echo "ping_max=$(get_ping_max)"
-    echo "http_code=$(get_http_code)"
-    echo "http_time=$(get_http_time)"
-    echo "status=$(get_status)"
-}
-
-# ===== ДИСПЕТЧЕР =============================================================
+# Диспетчер
 case "$1" in
-    --loss)         get_packet_loss ;;
-    --ping-time)    get_ping_time ;;
-    --ping-min)     get_ping_min ;;
-    --ping-max)     get_ping_max ;;
-    --http-code)    get_http_code ;;
-    --http-time)    get_http_time ;;
-    --status)       get_status ;;
-    --all)          get_all_metrics ;;
-    --all-multi)    get_all_metrics_multi ;;
-    --help|-h)
-        cat << 'HELP_EOF'
-╔══════════════════════════════════════════════════════════════════════════════╗
-║                    WB Monitor v4.1 - Справка                                 ║
-╠══════════════════════════════════════════════════════════════════════════════╣
-║                                                                              ║
-║  Использование:                                                              ║
-║    wb_monitor.sh --loss         - Потери пакетов (%)                         ║
-║    wb_monitor.sh --ping-time    - Среднее время пинга (мс)                   ║
-║    wb_monitor.sh --ping-min     - Минимальное время пинга (мс)               ║
-║    wb_monitor.sh --ping-max     - Максимальное время пинга (мс)              ║
-║    wb_monitor.sh --http-code    - HTTP статус код (200, 307, 0)              ║
-║    wb_monitor.sh --http-time    - Время HTTP ответа (сек)                    ║
-║    wb_monitor.sh --status       - Общий статус (OK/DOWN/PARTIAL)             ║
-║    wb_monitor.sh --all          - Все метрики в одну строку                  ║
-║    wb_monitor.sh --all-multi    - Все метрики (по одной на строку)           ║
-║                                                                              ║
-║  Примеры:                                                                    ║
-║    wb_monitor.sh --all                                                       ║
-║    wb_monitor.sh --loss                                                      ║
-║    wb_monitor.sh --http-code                                                 ║
-║                                                                              ║
-╚══════════════════════════════════════════════════════════════════════════════╝
-HELP_EOF
-        ;;
-    *)
-        echo "Использование: $0 {--loss|--ping-time|--ping-min|--ping-max|--http-code|--http-time|--status|--all|--all-multi|--help}"
-        exit 1
-        ;;
+    --loss) get_packet_loss ;;
+    --ping-time) get_ping_time ;;
+    --ping-min) get_ping_min ;;
+    --ping-max) get_ping_max ;;
+    --http-code) get_http_code ;;
+    --http-time) get_http_time ;;
+    --status) get_status ;;
+    --all) get_all_metrics ;;
+    --help) echo "WB Monitor v4.1 - Usage: $0 {--loss|--ping-time|--ping-min|--ping-max|--http-code|--http-time|--status|--all}" ;;
+    *) exit 1 ;;
 esac
+MONITOR_EOF
 
-exit 0
+sudo chmod +x /usr/local/bin/wb_monitor.sh
+echo -e "${GREEN}✓ Скрипт создан: /usr/local/bin/wb_monitor.sh${NC}"
+
+# ============================================================================
+# 5. СОЗДАНИЕ КОНФИГА ZABBIX AGENT
+# ============================================================================
+echo -e "\n${BLUE}[5/6] Создание конфига Zabbix Agent...${NC}"
+
+CONF_FILE="$AGENT_CONF_DIR/wb_monitor.conf"
+
+sudo tee "$CONF_FILE" > /dev/null << 'CONF_EOF'
+# WB Monitor v4.1 - Конфигурация для Zabbix Agent
+# ============================================================================
+
+# Основные метрики
+UserParameter=wb.loss, /usr/local/bin/wb_monitor.sh --loss
+UserParameter=wb.ping.time, /usr/local/bin/wb_monitor.sh --ping-time
+UserParameter=wb.ping.min, /usr/local/bin/wb_monitor.sh --ping-min
+UserParameter=wb.ping.max, /usr/local/bin/wb_monitor.sh --ping-max
+UserParameter=wb.http.code, /usr/local/bin/wb_monitor.sh --http-code
+UserParameter=wb.http.time, /usr/local/bin/wb_monitor.sh --http-time
+UserParameter=wb.status, /usr/local/bin/wb_monitor.sh --status
+CONF_EOF
+
+echo -e "${GREEN}✓ Конфиг создан: $CONF_FILE${NC}"
+
+# ============================================================================
+# 6. ПЕРЕЗАПУСК И ПРОВЕРКА
+# ============================================================================
+echo -e "\n${BLUE}[6/6] Перезапуск и проверка...${NC}"
+
+if systemctl restart "$AGENT_SERVICE" 2>/dev/null; then
+    echo -e "${GREEN}✓ Агент перезапущен: systemctl restart $AGENT_SERVICE${NC}"
+else
+    for alt in zabbix-agent2 zabbix-agent zabbix_agentd; do
+        if systemctl restart "$alt" 2>/dev/null; then
+            echo -e "${GREEN}✓ Агент перезапущен: systemctl restart $alt${NC}"
+            break
+        fi
+    done
+fi
+
+sleep 2
+
+echo -e "\n${YELLOW}Результаты мониторинга:${NC}"
+/usr/local/bin/wb_monitor.sh --all
+
+echo -e "\n${YELLOW}Проверка через Zabbix Agent:${NC}"
+if command -v zabbix_get >/dev/null 2>&1; then
+    echo -n "  wb.loss:      "
+    zabbix_get -s 127.0.0.1 -k wb.loss 2>/dev/null || echo "недоступно"
+    echo -n "  wb.ping.time: "
+    zabbix_get -s 127.0.0.1 -k wb.ping.time 2>/dev/null || echo "недоступно"
+    echo -n "  wb.http.code: "
+    zabbix_get -s 127.0.0.1 -k wb.http.code 2>/dev/null || echo "недоступно"
+    echo -n "  wb.status:    "
+    zabbix_get -s 127.0.0.1 -k wb.status 2>/dev/null || echo "недоступно"
+else
+    echo -e "${YELLOW}⚠ zabbix_get не установлен${NC}"
+fi
+
+# ============================================================================
+# ИТОГ
+# ============================================================================
+echo -e "\n${GREEN}========================================${NC}"
+echo -e "${GREEN}УСТАНОВКА ЗАВЕРШЕНА!${NC}"
+echo -e "${GREEN}========================================${NC}"
+echo -e ""
+echo -e "${BLUE}Информация:${NC}"
+echo -e "  Скрипт:   /usr/local/bin/wb_monitor.sh"
+echo -e "  Конфиг:   $CONF_FILE"
+echo -e "  Агент:    $AGENT_TYPE"
+echo -e "  Версия:   $AGENT_VERSION"
+echo -e "  Сервис:   $AGENT_SERVICE"
+echo -e ""
+echo -e "${BLUE}Метрики для Zabbix:${NC}"
+echo -e "  wb.loss        - Потери пакетов (%)"
+echo -e "  wb.ping.time   - Среднее время пинга (мс)"
+echo -e "  wb.ping.min    - Минимальное время пинга (мс)"
+echo -e "  wb.ping.max    - Максимальное время пинга (мс)"
+echo -e "  wb.http.code   - HTTP статус код"
+echo -e "  wb.http.time   - Время HTTP ответа (сек)"
+echo -e "  wb.status      - Статус (OK/DOWN/PARTIAL)"
+echo -e ""
+echo -e "${BLUE}Далее в Zabbix Server:${NC}"
+echo -e "  Создайте шаблон с этими ключами и назначьте на хост"
+echo -e ""
+echo -e "${GREEN}Готово! 🚀${NC}"
