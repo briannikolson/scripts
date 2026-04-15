@@ -1,10 +1,14 @@
 #!/bin/bash
 # ============================================================================
-# WB Monitor
+# WB Monitor v5.0 - Финальная самодостаточная установка
+# Мониторинг: wildberries.ru, u-card.wb.ru, u-search.wb.ru
+# Включает: скрипт, конфиги Zabbix, автообновление (systemd timer)
+# Работает на: Ubuntu, Debian, CentOS, RHEL, Rocky, Alma, Alpine, Arch
 # ============================================================================
 
 set -e
 
+# Цвета
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -12,13 +16,18 @@ BLUE='\033[0;34m'
 NC='\033[0m'
 
 echo -e "${GREEN}========================================${NC}"
-echo -e "${GREEN}WB Monitor${NC}"
+echo -e "${GREEN}WB Monitor v5.0 - Полная установка${NC}"
+echo -e "${GREEN}========================================${NC}"
+echo -e "${BLUE}Мониторинг:${NC}"
+echo -e "  🌐 wildberries.ru (основной)"
+echo -e "  🃏 u-card.wb.ru (карточки)"
+echo -e "  🔍 u-search.wb.ru (поиск)"
 echo -e "${GREEN}========================================${NC}"
 
 # ============================================================================
 # 1. ОПРЕДЕЛЕНИЕ ОС
 # ============================================================================
-echo -e "\n${BLUE}[1/7] Определение системы...${NC}"
+echo -e "\n${BLUE}[1/8] Определение системы...${NC}"
 
 detect_os() {
     if [ -f /etc/os-release ]; then
@@ -33,7 +42,7 @@ detect_os() {
             PKG_MANAGER="apt"
             INSTALL_CMD="apt update && apt install -y"
             ;;
-        centos|rhel|rocky|almalinux|fedora)
+        centos|rhel|rocky|almalinux|fedora|amzn)
             PKG_MANAGER="yum"
             INSTALL_CMD="yum install -y"
             if command -v dnf >/dev/null 2>&1; then
@@ -63,7 +72,7 @@ detect_os
 # ============================================================================
 # 2. УСТАНОВКА ЗАВИСИМОСТЕЙ
 # ============================================================================
-echo -e "\n${BLUE}[2/7] Установка зависимостей...${NC}"
+echo -e "\n${BLUE}[2/8] Установка зависимостей...${NC}"
 
 install_package() {
     local pkg=$1
@@ -88,7 +97,7 @@ install_package "bc"
 # ============================================================================
 # 3. ПОИСК ZABBIX AGENT
 # ============================================================================
-echo -e "\n${BLUE}[3/7] Поиск Zabbix Agent...${NC}"
+echo -e "\n${BLUE}[3/8] Поиск Zabbix Agent...${NC}"
 
 AGENT_PATH=""
 AGENT_TYPE=""
@@ -126,6 +135,7 @@ fi
 
 if [ -z "$AGENT_PATH" ]; then
     echo -e "${RED}✗ Zabbix Agent не найден${NC}"
+    echo -e "${YELLOW}Установите Zabbix Agent и запустите скрипт снова${NC}"
     exit 1
 fi
 
@@ -143,19 +153,21 @@ done
 
 if [ -z "$AGENT_CONF_DIR" ]; then
     AGENT_CONF_DIR="/etc/zabbix/zabbix_agentd.d"
-    mkdir -p "$AGENT_CONF_DIR"
+    sudo mkdir -p "$AGENT_CONF_DIR"
     echo -e "${YELLOW}✓ Создана директория: $AGENT_CONF_DIR${NC}"
 fi
 
 # ============================================================================
 # 4. СОЗДАНИЕ СКРИПТА МОНИТОРИНГА
 # ============================================================================
-echo -e "\n${BLUE}[4/7] Создание скрипта мониторинга...${NC}"
+echo -e "\n${BLUE}[4/8] Создание скрипта мониторинга...${NC}"
 
 sudo tee /usr/local/bin/wb_monitor.sh > /dev/null << 'MONITOR_EOF'
 #!/bin/bash
 # ============================================================================
-# WB Monitor - Мониторинг Wildberries
+# WB Monitor v5.0 - Мониторинг Wildberries
+# Поддерживает старые параметры (--loss, --ping-time, --http-code и т.д.)
+# + новые параметры для трёх сервисов (--main-*, --card-*, --search-*)
 # ============================================================================
 
 # Список сервисов
@@ -255,7 +267,6 @@ case "$1" in
     --search-http-code) get_http_code "${SERVICES[search]}" ;;
     --search-http-time) get_http_time "${SERVICES[search]}" ;;
     
-    # --- ВСЕ МЕТРИКИ ---
     --all-main)
         echo "loss=$(get_packet_loss ${SERVICES[main]}) ping_time=$(get_ping_time ${SERVICES[main]}) ping_min=$(get_ping_min ${SERVICES[main]}) ping_max=$(get_ping_max ${SERVICES[main]}) http_code=$(get_http_code ${SERVICES[main]}) http_time=$(get_http_time ${SERVICES[main]})"
         ;;
@@ -281,24 +292,15 @@ case "$1" in
 WB Monitor v5.0
 
 СТАРЫЕ ПАРАМЕТРЫ (совместимость):
-  --loss              Потери пакетов для wildberries.ru
-  --ping-time         Среднее время пинга
-  --ping-min          Минимальное время пинга
-  --ping-max          Максимальное время пинга
-  --http-code         HTTP статус код
-  --http-time         HTTP время ответа
-  --status            Общий статус (OK/DOWN/PARTIAL)
+  --loss, --ping-time, --ping-min, --ping-max, --http-code, --http-time, --status
 
-НОВЫЕ ПАРАМЕТРЫ (3 сервиса):
-  --main-*            wildberries.ru
-  --card-*            u-card.wb.ru
-  --search-*          u-search.wb.ru
+НОВЫЕ ПАРАМЕТРЫ:
+  --main-*, --card-*, --search-*
 
 Примеры:
   wb_monitor.sh --loss
   wb_monitor.sh --main-loss
   wb_monitor.sh --card-http-code
-  wb_monitor.sh --search-ping-time
   wb_monitor.sh --all
 HELP_EOF
         ;;
@@ -310,9 +312,9 @@ sudo chmod +x /usr/local/bin/wb_monitor.sh
 echo -e "${GREEN}✓ Скрипт создан: /usr/local/bin/wb_monitor.sh${NC}"
 
 # ============================================================================
-# 5. СОЗДАНИЕ КОНФИГА ZABBIX AGENT (СТАРЫЕ + НОВЫЕ ПАРАМЕТРЫ)
+# 5. СОЗДАНИЕ КОНФИГА ZABBIX AGENT
 # ============================================================================
-echo -e "\n${BLUE}[5/7] Создание конфига Zabbix Agent...${NC}"
+echo -e "\n${BLUE}[5/8] Создание конфига Zabbix Agent...${NC}"
 
 CONF_FILE="$AGENT_CONF_DIR/wb_monitor.conf"
 
@@ -362,11 +364,11 @@ echo -e "${GREEN}✓ Конфиг создан: $CONF_FILE${NC}"
 # ============================================================================
 # 6. СОЗДАНИЕ СКРИПТА АВТООБНОВЛЕНИЯ
 # ============================================================================
-echo -e "\n${BLUE}[6/7] Создание скрипта автообновления...${NC}"
+echo -e "\n${BLUE}[6/8] Создание скрипта автообновления...${NC}"
 
 sudo tee /usr/local/bin/update_wb_monitor.sh > /dev/null << 'UPDATE_EOF'
 #!/bin/bash
-# WB Monitor - Автообновление
+# WB Monitor - Скрипт автообновления
 
 GITHUB_URL="https://raw.githubusercontent.com/briannikolson/scripts/refs/heads/main/install_wb_monitor"
 LOCAL_SCRIPT="/usr/local/bin/wb_monitor.sh"
@@ -397,6 +399,8 @@ if ! cmp -s "$TEMP_SCRIPT" "$LOCAL_SCRIPT"; then
         log "✓ Zabbix Agent2 restarted"
     elif systemctl restart zabbix-agent 2>/dev/null; then
         log "✓ Zabbix Agent restarted"
+    else
+        log "⚠ Could not restart Zabbix Agent"
     fi
 else
     log "No changes detected"
@@ -410,24 +414,54 @@ sudo chmod +x /usr/local/bin/update_wb_monitor.sh
 echo -e "${GREEN}✓ Скрипт автообновления создан${NC}"
 
 # ============================================================================
-# 7. НАСТРОЙКА АВТООБНОВЛЕНИЯ
+# 7. НАСТРОЙКА АВТООБНОВЛЕНИЯ (systemd timer)
 # ============================================================================
-echo -e "\n${BLUE}[7/7] Настройка автообновления...${NC}"
+echo -e "\n${BLUE}[7/8] Настройка автообновления (systemd timer)...${NC}"
 
-if ! crontab -l 2>/dev/null | grep -q "update_wb_monitor.sh"; then
-    (crontab -l 2>/dev/null; echo "*/5 * * * * /usr/local/bin/update_wb_monitor.sh > /dev/null 2>&1") | crontab -
-    echo -e "${GREEN}✓ Добавлена задача в cron (каждые 5 минут)${NC}"
-else
-    echo -e "${GREEN}✓ Задача в cron уже существует${NC}"
-fi
+# Создаём сервис
+sudo tee /etc/systemd/system/wb-monitor-update.service > /dev/null << 'SERVICE_EOF'
+[Unit]
+Description=WB Monitor Update Service
+After=network.target
 
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/update_wb_monitor.sh
+User=root
+StandardOutput=journal
+StandardError=journal
+SERVICE_EOF
+
+# Создаём таймер
+sudo tee /etc/systemd/system/wb-monitor-update.timer > /dev/null << 'TIMER_EOF'
+[Unit]
+Description=WB Monitor Update Timer
+Requires=wb-monitor-update.service
+
+[Timer]
+OnCalendar=*:0/5
+Persistent=true
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target
+TIMER_EOF
+
+# Запускаем таймер
+sudo systemctl daemon-reload
+sudo systemctl enable wb-monitor-update.timer
+sudo systemctl start wb-monitor-update.timer
+
+echo -e "${GREEN}✓ Systemd timer создан и запущен${NC}"
+
+# Создаём лог файл
 sudo touch /var/log/wb_monitor_update.log
 sudo chmod 644 /var/log/wb_monitor_update.log
 
 # ============================================================================
-# ПЕРЕЗАПУСК ZABBIX AGENT
+# 8. ПЕРЕЗАПУСК ZABBIX AGENT И ПРОВЕРКА
 # ============================================================================
-echo -e "\n${YELLOW}Перезапуск Zabbix Agent...${NC}"
+echo -e "\n${BLUE}[8/8] Перезапуск и проверка...${NC}"
 
 if systemctl restart "$AGENT_SERVICE" 2>/dev/null; then
     echo -e "${GREEN}✓ Агент перезапущен: $AGENT_SERVICE${NC}"
@@ -442,25 +476,25 @@ fi
 
 sleep 2
 
-# ============================================================================
-# ПРОВЕРКА
-# ============================================================================
 echo -e "\n${YELLOW}Результаты мониторинга:${NC}"
 /usr/local/bin/wb_monitor.sh --all
 
-echo -e "\n${YELLOW}Проверка старых параметров:${NC}"
+echo -e "\n${YELLOW}Проверка через Zabbix Agent:${NC}"
 if command -v zabbix_get >/dev/null 2>&1; then
     echo -n "  wb.loss:         "
     zabbix_get -s 127.0.0.1 -k wb.loss 2>/dev/null || echo "недоступно"
-    echo -n "  wb.ping.time:    "
-    zabbix_get -s 127.0.0.1 -k wb.ping.time 2>/dev/null || echo "недоступно"
-    echo -n "  wb.http.code:    "
-    zabbix_get -s 127.0.0.1 -k wb.http.code 2>/dev/null || echo "недоступно"
-    echo -n "  wb.status:       "
-    zabbix_get -s 127.0.0.1 -k wb.status 2>/dev/null || echo "недоступно"
+    echo -n "  wb.card.loss:    "
+    zabbix_get -s 127.0.0.1 -k wb.card.loss 2>/dev/null || echo "недоступно"
+    echo -n "  wb.search.loss:  "
+    zabbix_get -s 127.0.0.1 -k wb.search.loss 2>/dev/null || echo "недоступно"
+    echo -n "  wb.version:      "
+    zabbix_get -s 127.0.0.1 -k wb.version 2>/dev/null || echo "недоступно"
 else
     echo -e "${YELLOW}⚠ zabbix_get не установлен${NC}"
 fi
+
+echo -e "\n${YELLOW}Статус автообновления:${NC}"
+sudo systemctl status wb-monitor-update.timer --no-pager | grep -E "Active|Trigger|Next"
 
 # ============================================================================
 # ИТОГ
@@ -469,15 +503,22 @@ echo -e "\n${GREEN}========================================${NC}"
 echo -e "${GREEN}УСТАНОВКА ЗАВЕРШЕНА!${NC}"
 echo -e "${GREEN}========================================${NC}"
 echo -e ""
-echo -e "${BLUE}Всего метрик в Zabbix: 7 старых + 18 новых = 25${NC}"
+echo -e "${BLUE}Установленные компоненты:${NC}"
+echo -e "  📁 Скрипт:        /usr/local/bin/wb_monitor.sh"
+echo -e "  📁 Конфиг:        $CONF_FILE"
+echo -e "  📁 Обновление:    /usr/local/bin/update_wb_monitor.sh"
+echo -e "  📁 Лог:           /var/log/wb_monitor_update.log"
+echo -e "  ⏰ Systemd timer: wb-monitor-update.timer (каждые 5 минут)"
 echo -e ""
-echo -e "${BLUE}Старые параметры (работают как раньше):${NC}"
-echo -e "  wb.loss, wb.ping.time, wb.ping.min, wb.ping.max"
-echo -e "  wb.http.code, wb.http.time, wb.status"
+echo -e "${BLUE}Мониторинг (25 метрик):${NC}"
+echo -e "  🌐 MAIN:   7 метрик (wb.main.*)"
+echo -e "  🃏 CARD:   6 метрик (wb.card.*)"
+echo -e "  🔍 SEARCH: 6 метрик (wb.search.*)"
+echo -e "  📌 Старые: 6 метрик (wb.*) + wb.status + wb.version"
 echo -e ""
-echo -e "${BLUE}Новые параметры (3 сервиса):${NC}"
-echo -e "  MAIN:   wb.main.*"
-echo -e "  CARD:   wb.card.*"
-echo -e "  SEARCH: wb.search.*"
+echo -e "${BLUE}Проверка:${NC}"
+echo -e "  /usr/local/bin/wb_monitor.sh --all"
+echo -e "  sudo systemctl status wb-monitor-update.timer"
+echo -e "  tail -f /var/log/wb_monitor_update.log"
 echo -e ""
 echo -e "${GREEN}Готово! 🚀${NC}"
