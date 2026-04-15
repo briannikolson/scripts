@@ -1,7 +1,6 @@
 #!/bin/bash
 # ============================================================================
-# WB Monitor v5.0 - Полная финальная установка
-# Совместимость со старыми параметрами + новые сервисы
+# WB Monitor
 # ============================================================================
 
 set -e
@@ -13,7 +12,7 @@ BLUE='\033[0;34m'
 NC='\033[0m'
 
 echo -e "${GREEN}========================================${NC}"
-echo -e "${GREEN}WB Monitor v5.0 - Полная установка${NC}"
+echo -e "${GREEN}WB Monitor${NC}"
 echo -e "${GREEN}========================================${NC}"
 
 # ============================================================================
@@ -149,16 +148,14 @@ if [ -z "$AGENT_CONF_DIR" ]; then
 fi
 
 # ============================================================================
-# 4. СОЗДАНИЕ СКРИПТА МОНИТОРИНГА (СО СТАРЫМИ ПАРАМЕТРАМИ)
+# 4. СОЗДАНИЕ СКРИПТА МОНИТОРИНГА
 # ============================================================================
 echo -e "\n${BLUE}[4/7] Создание скрипта мониторинга...${NC}"
 
 sudo tee /usr/local/bin/wb_monitor.sh > /dev/null << 'MONITOR_EOF'
 #!/bin/bash
 # ============================================================================
-# WB Monitor v5.0 - Мониторинг Wildberries
-# Поддерживает старые параметры (--loss, --ping-time, --http-code и т.д.)
-# + новые параметры для трёх сервисов (--main-*, --card-*, --search-*)
+# WB Monitor - Мониторинг Wildberries
 # ============================================================================
 
 # Список сервисов
@@ -229,7 +226,6 @@ get_status() {
 
 # ===== ДИСПЕТЧЕР =============================================================
 case "$1" in
-    # --- СТАРЫЕ ПАРАМЕТРЫ (для обратной совместимости) ---
     --loss)         get_packet_loss "${SERVICES[main]}" ;;
     --ping-time)    get_ping_time "${SERVICES[main]}" ;;
     --ping-min)     get_ping_min "${SERVICES[main]}" ;;
@@ -238,7 +234,6 @@ case "$1" in
     --http-time)    get_http_time "${SERVICES[main]}" ;;
     --status)       get_status ;;
     
-    # --- НОВЫЕ ПАРАМЕТРЫ: MAIN (wildberries.ru) ---
     --main-loss)        get_packet_loss "${SERVICES[main]}" ;;
     --main-ping-time)   get_ping_time "${SERVICES[main]}" ;;
     --main-ping-min)    get_ping_min "${SERVICES[main]}" ;;
@@ -246,7 +241,6 @@ case "$1" in
     --main-http-code)   get_http_code "${SERVICES[main]}" ;;
     --main-http-time)   get_http_time "${SERVICES[main]}" ;;
     
-    # --- НОВЫЕ ПАРАМЕТРЫ: CARD (u-card.wb.ru) ---
     --card-loss)        get_packet_loss "${SERVICES[card]}" ;;
     --card-ping-time)   get_ping_time "${SERVICES[card]}" ;;
     --card-ping-min)    get_ping_min "${SERVICES[card]}" ;;
@@ -254,7 +248,6 @@ case "$1" in
     --card-http-code)   get_http_code "${SERVICES[card]}" ;;
     --card-http-time)   get_http_time "${SERVICES[card]}" ;;
     
-    # --- НОВЫЕ ПАРАМЕТРЫ: SEARCH (u-search.wb.ru) ---
     --search-loss)      get_packet_loss "${SERVICES[search]}" ;;
     --search-ping-time) get_ping_time "${SERVICES[search]}" ;;
     --search-ping-min)  get_ping_min "${SERVICES[search]}" ;;
