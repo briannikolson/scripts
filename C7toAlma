@@ -1,0 +1,332 @@
+#!/bin/bash
+
+##############################################################################
+# Интерактивный скрипт обновления CentOS 7 до AlmaLinux 8
+# Версия: 1.0
+##############################################################################
+
+# Цвета для вывода
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+# Функции для красивого вывода
+print_header() {
+    echo -e "\n${BLUE}═══════════════════════════════════════════════════════════════${NC}"
+    echo -e "${BLUE}  $1${NC}"
+    echo -e "${BLUE}═══════════════════════════════════════════════════════════════${NC}"
+}
+
+print_success() {
+    echo -e "${GREEN}✅ $1${NC}"
+}
+
+print_error() {
+    echo -e "${RED}❌ $1${NC}"
+}
+
+print_warning() {
+    echo -e "${YELLOW}⚠️  $1${NC}"
+}
+
+print_info() {
+    echo -e "${BLUE}ℹ️  $1${NC}"
+}
+
+print_step() {
+    echo -e "\n${YELLOW}▶ $1${NC}"
+}
+
+ask_yes_no() {
+    local prompt="$1 (y/N): "
+    local answer
+    read -p "$prompt" answer
+    case "${answer,,}" in
+        y|yes) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+ask_continue() {
+    local prompt="$1 (Press Enter to continue)"
+    read -p "$prompt"
+}
+
+##############################################################################
+# НАЧАЛО СКРИПТА
+##############################################################################
+
+clear
+
+print_header "🔄 ОБНОВЛЕНИЕ CENTOS 7 → ALMALINUX 8"
+echo ""
+echo "Этот скрипт поможет вам выполнить обновление CentOS 7 до AlmaLinux 8"
+echo "с использованием официального инструмента ELevate."
+echo ""
+echo "⚠️  ВАЖНО: Перед началом убедитесь, что у вас есть:"
+echo "   • Полная резервная копия системы"
+echo "   • Консольный доступ к серверу"
+echo "   • Минимум 1.5 ГБ свободной ОЗУ (или swap)"
+echo "   • Минимум 5 ГБ свободного дискового пространства"
+echo ""
+
+if ! ask_yes_no "Вы сделали резервную копию системы?"; then
+    print_error "Создайте резервную копию и запустите скрипт снова!"
+    exit 1
+fi
+
+if ! ask_yes_no "Продолжить обновление?"; then
+    print_info "Обновление отменено."
+    exit 0
+fi
+
+echo ""
+print_header "ШАГ 1: ПРОВЕРКА СИСТЕМЫ"
+echo ""
+
+# Проверка текущей ОС
+print_step "Проверка текущей версии ОС..."
+if [ -f /etc/os-release ]; then
+    CURRENT_OS=$(grep "^PRETTY_NAME" /etc/os-release | cut -d'"' -f2)
+    echo "Текущая ОС: $CURRENT_OS"
+    
+    if ! grep -q "CentOS Linux 7" /etc/os-release; then
+        print_error "Эта система не является CentOS 7!"
+        exit 1
+    fi
+else
+    print_error "Не удалось определить версию ОС!"
+    exit 1
+fi
+
+# Проверка прав root
+print_step "Проверка прав..."
+if [ "$EUID" -ne 0 ]; then 
+    print_error "Скрипт должен выполняться от root!"
+    exit 1
+fi
+print_success "Выполняется от root"
+
+# Проверка свободного места
+print_step "Проверка свободного места..."
+FREE_SPACE=$(df / --output=avail | tail -n1 | awk '{print $1}')
+if [ "$FREE_SPACE" -lt 5000000 ]; then
+    print_error "Недостаточно свободного места! Требуется минимум 5 ГБ."
+    echo "Свободно: $((FREE_SPACE/1024)) МБ"
+    exit 1
+fi
+print_success "Свободного места достаточно: $((FREE_SPACE/1024)) МБ"
+
+# Проверка памяти
+print_step "Проверка оперативной памяти..."
+TOTAL_MEM=$(free -m | awk '/^Mem:/{print $2}')
+if [ "$TOTAL_MEM" -lt 1536 ]; then
+    print_warning "Недостаточно ОЗУ: ${TOTAL_MEM} МБ (требуется 1536 МБ)"
+    if ! ask_yes_no "Добавить swap-файл размером 2 ГБ?"; then
+        print_error "Обновление невозможно без достаточной памяти!"
+        exit 1
+    fi
+    NEED_SWAP=true
+else
+    print_success "ОЗУ достаточно: ${TOTAL_MEM} МБ"
+fi
+
+print_header "ШАГ 2: ПОДГОТОВКА СИСТЕМЫ"
+echo ""
+
+# Обновление репозиториев
+print_step "Обновление репозиториев CentOS 7..."
+if ask_yes_no "Переключить репозитории на зеркала AlmaLinux для ELevate?"; then
+    curl -o /etc/yum.repos.d/CentOS-Base.repo https://el7.repo.almalinux.org/centos/CentOS-Base.repo
+    print_success "Репозитории обновлены"
+else
+    print_warning "Репозитории не обновлены!"
+fi
+
+# Добавление swap при необходимости
+if [ "$NEED_SWAP" = true ]; then
+    print_step "Создание swap-файла..."
+    dd if=/dev/zero of=/swapfile bs=1M count=2048
+    chmod 600 /swapfile
+    mkswap /swapfile
+    swapon /swapfile
+    echo "/swapfile swap swap defaults 0 0" >> /etc/fstab
+    print_success "Swap-файл создан (2 ГБ)"
+    free -h
+fi
+
+# Очистка кэша
+print_step "Очистка кэша YUM..."
+yum clean all
+print_success "Кэш очищен"
+
+# Обновление системы
+print_step "Обновление CentOS 7 до последней версии..."
+if ask_yes_no "Выполнить yum update -y?"; then
+    yum update -y
+    print_success "Система обновлена"
+    
+    if ask_yes_no "Требуется перезагрузка. Перезагрузить сейчас?"; then
+        print_info "Перезагрузка через 5 секунд..."
+        sleep 5
+        reboot
+    fi
+else
+    print_warning "Обновление системы пропущено!"
+fi
+
+print_header "ШАГ 3: УСТАНОВКА ELEVATE"
+echo ""
+
+print_step "Установка репозитория ELevate..."
+yum install -y http://repo.almalinux.org/elevate/elevate-release-latest-el7.noarch.rpm
+print_success "Репозиторий ELevate установлен"
+
+print_step "Установка инструментов миграции..."
+yum install -y leapp-upgrade leapp-data-almalinux
+print_success "Инструменты установлены"
+
+print_header "ШАГ 4: ИСПРАВЛЕНИЕ /ETC/FSTAB"
+echo ""
+
+print_step "Проверка порядка в /etc/fstab..."
+if grep -q "^devpts.*/dev/pts" /etc/fstab && grep -q "^devtmpfs.*/dev" /etc/fstab; then
+    DEVTMPFS_LINE=$(grep -n "^devtmpfs.*/dev" /etc/fstab | cut -d: -f1)
+    DEVPTS_LINE=$(grep -n "^devpts.*/dev/pts" /etc/fstab | cut -d: -f1)
+    
+    if [ "$DEVTMPFS_LINE" -gt "$DEVPTS_LINE" ]; then
+        print_warning "Найден неправильный порядок в fstab!"
+        echo "Текущий порядок: /dev/pts → /dev (неправильно)"
+        echo "Нужно: /dev → /dev/pts"
+        
+        if ask_yes_no "Исправить автоматически?"; then
+            cp /etc/fstab /etc/fstab.backup
+            sed -i '/^devtmpfs.*\/dev/d' /etc/fstab
+            sed -i '/^devpts.*\/dev\/pts/d' /etc/fstab
+            
+            # Добавляем в правильном порядке
+            awk '
+            /^proc/ {print; print "devtmpfs       /dev         devtmpfs mode=0755,nosuid    0     0"; next}
+            /^sysfs/ {print; print "tmpfs          /run         tmpfs    defaults            0     0"; next}
+            /^tmpfs/ && !printed_run {printed_run=1; next}
+            /^devpts/ {print "devpts         /dev/pts     devpts   gid=5,mode=620      0     0"; next}
+            !/^devtmpfs/ && !/^devpts/ {print}
+            ' /etc/fstab.backup > /etc/fstab
+            
+            print_success "fstab исправлен!"
+            echo "Новый порядок:"
+            grep -E "devtmpfs|devpts|tmpfs|proc|sysfs" /etc/fstab
+        fi
+    else
+        print_success "Порядок в fstab правильный"
+    fi
+fi
+
+print_header "ШАГ 5: УСТРАНЕНИЕ ПРОБЛЕМ"
+echo ""
+
+# Блокировка старых драйверов
+print_step "Блокировка устаревших драйверов (floppy, pata_acpi)..."
+rmmod floppy pata_acpi 2>/dev/null
+echo "blacklist floppy" > /etc/modprobe.d/blacklist-floppy.conf
+echo "blacklist pata_acpi" > /etc/modprobe.d/blacklist-pata_acpi.conf
+dracut --force
+print_success "Драйверы заблокированы"
+
+# Удаление проблемных пакетов
+print_step "Проверка проблемных пакетов..."
+PROBLEM_PACKAGES="dante dante-server zabbix-agent zabbix-release"
+for pkg in $PROBLEM_PACKAGES; do
+    if rpm -q $pkg &>/dev/null; then
+        print_warning "Найден проблемный пакет: $pkg"
+        if ask_yes_no "Удалить $pkg?"; then
+            yum remove -y $pkg
+            print_success "$pkg удален"
+        fi
+    fi
+done
+
+# Настройка ответов Leapp
+print_step "Настройка Leapp..."
+leapp answer --section remove_pam_pkcs11_module_check.confirm=True
+print_success "Leapp настроен"
+
+# Проверка ядра
+print_step "Проверка загруженного ядра..."
+CURRENT_KERNEL=$(uname -r)
+LATEST_KERNEL=$(rpm -qa kernel | sort -V | tail -n1 | sed 's/kernel-//')
+
+if [ "$CURRENT_KERNEL" != "$LATEST_KERNEL" ]; then
+    print_warning "Загружено не самое новое ядро!"
+    echo "Текущее: $CURRENT_KERNEL"
+    echo "Последнее: $LATEST_KERNEL"
+    
+    if ask_yes_no "Перезагрузиться с последним ядром?"; then
+        print_info "Перезагрузка через 5 секунд..."
+        sleep 5
+        reboot
+    fi
+else
+    print_success "Загружено последнее ядро: $CURRENT_KERNEL"
+fi
+
+print_header "ШАГ 6: ПРОВЕРКА ГОТОВНОСТИ"
+echo ""
+
+print_step "Запуск предварительной проверки Leapp..."
+leapp preupgrade
+
+echo ""
+print_warning "Проверьте отчет: /var/log/leapp/leapp-report.txt"
+echo ""
+
+if ask_yes_no "Проверка завершена. Перейти к обновлению?"; then
+    print_header "ШАГ 7: ЗАПУСК ОБНОВЛЕНИЯ"
+    echo ""
+    
+    print_warning "ВНИМАНИЕ! Система будет обновлена до AlmaLinux 8!"
+    print_warning "Этот процесс НЕОБРАТИМ и может занять 20-60 минут!"
+    echo ""
+    
+    if ask_yes_no "Вы уверены, что хотите продолжить?"; then
+        print_step "Запуск leapp upgrade..."
+        leapp upgrade
+        
+        if [ $? -eq 0 ]; then
+            print_success "Обновление подготовлено!"
+            print_step "Перезагрузка системы..."
+            
+            if ask_yes_no "Перезагрузить сейчас?"; then
+                print_info "Перезагрузка через 10 секунд..."
+                sleep 10
+                reboot
+            else
+                print_info "Перезагрузите систему вручную: sudo reboot"
+                print_info "При загрузке выберите 'ELevate-Upgrade-Initramfs'"
+            fi
+        else
+            print_error "Ошибка при выполнении leapp upgrade!"
+            print_info "Проверьте логи: /var/log/leapp/"
+            exit 1
+        fi
+    else
+        print_info "Обновление отменено."
+        exit 0
+    fi
+else
+    print_info "Проверка не пройдена. Исправьте ошибки и запустите скрипт снова."
+    print_info "Лог: /var/log/leapp/leapp-report.txt"
+    exit 1
+fi
+
+print_header "✅ СКРИПТ ЗАВЕРШЕН"
+echo ""
+echo "После перезагрузки проверьте:"
+echo "  • cat /etc/os-release (должна быть AlmaLinux 8)"
+echo "  • rpm -qa | grep el7 (старых пакетов быть не должно)"
+echo "  • yum update (обновите все пакеты)"
+echo ""
+echo "Если у вас есть вопросы - обратитесь к документации:"
+echo "  • https://wiki.almalinux.org/elevate/ELevate-quickstart-guide.html"
