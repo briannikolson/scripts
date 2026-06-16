@@ -2,7 +2,7 @@
 
 ##############################################################################
 # Интерактивный скрипт обновления CentOS 7 до AlmaLinux 8
-# Версия: 1.0
+# Версия: 1.1 (без автоматической перезагрузки)
 ##############################################################################
 
 # Цвета для вывода
@@ -39,6 +39,17 @@ print_step() {
     echo -e "\n${YELLOW}▶ $1${NC}"
 }
 
+print_reboot_required() {
+    echo -e "\n${RED}═══════════════════════════════════════════════════════════════${NC}"
+    echo -e "${RED}  🔄 ТРЕБУЕТСЯ ПЕРЕЗАГРУЗКА!${NC}"
+    echo -e "${RED}═══════════════════════════════════════════════════════════════${NC}"
+    echo -e "${YELLOW}После перезагрузки запустите скрипт с флагом --resume:${NC}"
+    echo -e "  ${GREEN}sudo ./C7toAlma --resume${NC}"
+    echo -e "\nИли выполните вручную:"
+    echo -e "  ${GREEN}sudo reboot${NC}"
+    echo -e "${RED}═══════════════════════════════════════════════════════════════${NC}"
+}
+
 ask_yes_no() {
     local prompt="$1 (y/N): "
     local answer
@@ -54,6 +65,13 @@ ask_continue() {
     read -p "$prompt"
 }
 
+# Проверка флага --resume
+RESUME_MODE=false
+if [ "$1" = "--resume" ] || [ "$1" = "-r" ]; then
+    RESUME_MODE=true
+    print_info "Режим возобновления (--resume)"
+fi
+
 ##############################################################################
 # НАЧАЛО СКРИПТА
 ##############################################################################
@@ -65,6 +83,12 @@ echo ""
 echo "Этот скрипт поможет вам выполнить обновление CentOS 7 до AlmaLinux 8"
 echo "с использованием официального инструмента ELevate."
 echo ""
+
+if [ "$RESUME_MODE" = true ]; then
+    print_warning "Режим возобновления: скрипт продолжит с того места, где остановился."
+    echo ""
+fi
+
 echo "⚠️  ВАЖНО: Перед началом убедитесь, что у вас есть:"
 echo "   • Полная резервная копия системы"
 echo "   • Консольный доступ к серверу"
@@ -133,28 +157,43 @@ else
     print_success "ОЗУ достаточно: ${TOTAL_MEM} МБ"
 fi
 
+# Проверка, не обновлена ли уже система
+if grep -q "AlmaLinux" /etc/os-release 2>/dev/null; then
+    print_success "Система уже обновлена до AlmaLinux!"
+    print_info "Обновление не требуется."
+    exit 0
+fi
+
 print_header "ШАГ 2: ПОДГОТОВКА СИСТЕМЫ"
 echo ""
 
-# Обновление репозиториев
-print_step "Обновление репозиториев CentOS 7..."
-if ask_yes_no "Переключить репозитории на зеркала AlmaLinux для ELevate?"; then
-    curl -o /etc/yum.repos.d/CentOS-Base.repo https://el7.repo.almalinux.org/centos/CentOS-Base.repo
-    print_success "Репозитории обновлены"
+# Обновление репозиториев (пропускаем в режиме --resume)
+if [ "$RESUME_MODE" = false ]; then
+    print_step "Обновление репозиториев CentOS 7..."
+    if ask_yes_no "Переключить репозитории на зеркала AlmaLinux для ELevate?"; then
+        curl -o /etc/yum.repos.d/CentOS-Base.repo https://el7.repo.almalinux.org/centos/CentOS-Base.repo
+        print_success "Репозитории обновлены"
+    else
+        print_warning "Репозитории не обновлены!"
+    fi
 else
-    print_warning "Репозитории не обновлены!"
+    print_info "Режим возобновления: пропускаем обновление репозиториев"
 fi
 
 # Добавление swap при необходимости
 if [ "$NEED_SWAP" = true ]; then
     print_step "Создание swap-файла..."
-    dd if=/dev/zero of=/swapfile bs=1M count=2048
-    chmod 600 /swapfile
-    mkswap /swapfile
-    swapon /swapfile
-    echo "/swapfile swap swap defaults 0 0" >> /etc/fstab
-    print_success "Swap-файл создан (2 ГБ)"
-    free -h
+    if [ ! -f /swapfile ]; then
+        dd if=/dev/zero of=/swapfile bs=1M count=2048
+        chmod 600 /swapfile
+        mkswap /swapfile
+        swapon /swapfile
+        echo "/swapfile swap swap defaults 0 0" >> /etc/fstab
+        print_success "Swap-файл создан (2 ГБ)"
+        free -h
+    else
+        print_info "Swap-файл уже существует"
+    fi
 fi
 
 # Очистка кэша
@@ -162,31 +201,41 @@ print_step "Очистка кэша YUM..."
 yum clean all
 print_success "Кэш очищен"
 
-# Обновление системы
-print_step "Обновление CentOS 7 до последней версии..."
-if ask_yes_no "Выполнить yum update -y?"; then
-    yum update -y
-    print_success "Система обновлена"
-    
-    if ask_yes_no "Требуется перезагрузка. Перезагрузить сейчас?"; then
-        print_info "Перезагрузка через 5 секунд..."
-        sleep 5
-        reboot
+# Обновление системы (пропускаем в режиме --resume)
+if [ "$RESUME_MODE" = false ]; then
+    print_step "Обновление CentOS 7 до последней версии..."
+    if ask_yes_no "Выполнить yum update -y?"; then
+        yum update -y
+        print_success "Система обновлена"
+        
+        print_reboot_required
+        print_info "После перезагрузки запустите: sudo ./C7toAlma --resume"
+        exit 0
+    else
+        print_warning "Обновление системы пропущено!"
     fi
 else
-    print_warning "Обновление системы пропущено!"
+    print_info "Режим возобновления: пропускаем yum update"
 fi
 
 print_header "ШАГ 3: УСТАНОВКА ELEVATE"
 echo ""
 
 print_step "Установка репозитория ELevate..."
-yum install -y http://repo.almalinux.org/elevate/elevate-release-latest-el7.noarch.rpm
-print_success "Репозиторий ELevate установлен"
+if ! rpm -q elevate-release &>/dev/null; then
+    yum install -y http://repo.almalinux.org/elevate/elevate-release-latest-el7.noarch.rpm
+    print_success "Репозиторий ELevate установлен"
+else
+    print_info "Репозиторий ELevate уже установлен"
+fi
 
 print_step "Установка инструментов миграции..."
-yum install -y leapp-upgrade leapp-data-almalinux
-print_success "Инструменты установлены"
+if ! rpm -q leapp-upgrade &>/dev/null; then
+    yum install -y leapp-upgrade leapp-data-almalinux
+    print_success "Инструменты установлены"
+else
+    print_info "Инструменты уже установлены"
+fi
 
 print_header "ШАГ 4: ИСПРАВЛЕНИЕ /ETC/FSTAB"
 echo ""
@@ -206,7 +255,6 @@ if grep -q "^devpts.*/dev/pts" /etc/fstab && grep -q "^devtmpfs.*/dev" /etc/fsta
             sed -i '/^devtmpfs.*\/dev/d' /etc/fstab
             sed -i '/^devpts.*\/dev\/pts/d' /etc/fstab
             
-            # Добавляем в правильном порядке
             awk '
             /^proc/ {print; print "devtmpfs       /dev         devtmpfs mode=0755,nosuid    0     0"; next}
             /^sysfs/ {print; print "tmpfs          /run         tmpfs    defaults            0     0"; next}
@@ -263,11 +311,9 @@ if [ "$CURRENT_KERNEL" != "$LATEST_KERNEL" ]; then
     echo "Текущее: $CURRENT_KERNEL"
     echo "Последнее: $LATEST_KERNEL"
     
-    if ask_yes_no "Перезагрузиться с последним ядром?"; then
-        print_info "Перезагрузка через 5 секунд..."
-        sleep 5
-        reboot
-    fi
+    print_reboot_required
+    print_info "После перезагрузки запустите: sudo ./C7toAlma --resume"
+    exit 0
 else
     print_success "Загружено последнее ядро: $CURRENT_KERNEL"
 fi
@@ -296,16 +342,24 @@ if ask_yes_no "Проверка завершена. Перейти к обнов
         
         if [ $? -eq 0 ]; then
             print_success "Обновление подготовлено!"
-            print_step "Перезагрузка системы..."
-            
-            if ask_yes_no "Перезагрузить сейчас?"; then
-                print_info "Перезагрузка через 10 секунд..."
-                sleep 10
-                reboot
-            else
-                print_info "Перезагрузите систему вручную: sudo reboot"
-                print_info "При загрузке выберите 'ELevate-Upgrade-Initramfs'"
-            fi
+            print_header "🔄 ПЕРЕЗАГРУЗКА ТРЕБУЕТСЯ"
+            echo ""
+            echo "Обновление подготовлено. Теперь нужно перезагрузить систему."
+            echo ""
+            echo "ВЫПОЛНИТЕ ВРУЧНУЮ:"
+            echo -e "  ${GREEN}sudo reboot${NC}"
+            echo ""
+            echo "⚠️  ВАЖНО: При загрузке в меню GRUB автоматически"
+            echo "    выберется пункт 'ELevate-Upgrade-Initramfs'."
+            echo "    НЕ ВМЕШИВАЙТЕСЬ в процесс загрузки."
+            echo ""
+            echo "После перезагрузки проверьте:"
+            echo "  • cat /etc/os-release (должна быть AlmaLinux 8)"
+            echo "  • rpm -qa | grep el7 (старых пакетов быть не должно)"
+            echo "  • yum update (обновите все пакеты)"
+            echo ""
+            print_info "Скрипт завершен. Перезагрузите систему вручную."
+            exit 0
         else
             print_error "Ошибка при выполнении leapp upgrade!"
             print_info "Проверьте логи: /var/log/leapp/"
