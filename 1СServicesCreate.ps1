@@ -1,5 +1,5 @@
 # ============================================
-# 1C SERVER MANAGER - ULTIMATE EDITION v2.0
+# 1C SERVER MANAGER - ULTIMATE EDITION v3.0
 # ============================================
 
 # Проверка прав администратора
@@ -620,7 +620,7 @@ function Change-1CServerPort {
 }
 
 # ============================================
-# РАС СЛУЖБЫ (ИСПРАВЛЕННАЯ ВЕРСИЯ)
+# РАС СЛУЖБЫ (ПОЛНОСТЬЮ ИСПРАВЛЕННАЯ ВЕРСИЯ)
 # ============================================
 
 function Get-RASServices {
@@ -694,6 +694,39 @@ function Remove-RASService {
     Write-Log "RAS service deleted: $ServiceName"
 }
 
+function Get-RASPlatformByAgent {
+    param(
+        [string]$AgentPort,
+        [array]$Platforms,
+        [array]$Servers
+    )
+    
+    # Пытаемся найти сервер с таким портом
+    $matchingServer = $Servers | Where-Object { $_.Port -eq $AgentPort } | Select-Object -First 1
+    
+    if($matchingServer) {
+        # Нашли сервер, ищем платформу с его версией
+        $rasPlatform = $Platforms | Where-Object { 
+            $_.HasRAS -and $_.Version -eq $matchingServer.Version 
+        } | Select-Object -First 1
+        
+        if($rasPlatform) {
+            Write-Host "Found RAS version: $($rasPlatform.Version) (matches agent version $($matchingServer.Version))" -ForegroundColor Green
+            return $rasPlatform
+        } else {
+            Write-Host "WARNING: No RAS found for version $($matchingServer.Version)" -ForegroundColor Red
+            Write-Host "Available RAS versions:" -ForegroundColor Yellow
+            $Platforms | Where-Object { $_.HasRAS } | ForEach-Object {
+                Write-Host "  - $($_.Version)" -ForegroundColor Gray
+            }
+            return $null
+        }
+    } else {
+        Write-Host "No server found on port $AgentPort" -ForegroundColor Yellow
+        return $null
+    }
+}
+
 function Create-RASService {
     $platforms = Get-1CPlatforms
     
@@ -714,6 +747,10 @@ function Create-RASService {
     }
     
     $servers = Get-1CServerMap
+    $rasPlatform = $null
+    $ctrlPort = $null
+    $agentName = "localhost"
+    
     if($servers) {
         Write-Host ""
         Write-Host "Available 1C servers (agents):" -ForegroundColor Cyan
@@ -724,8 +761,6 @@ function Create-RASService {
         }
         Write-Host ""
         $useExisting = Read-Host "Connect to existing server? (y/n) (n - manual entry)"
-        
-        $selectedServer = $null
         
         if($useExisting -eq 'y') {
             $srvChoice = Read-Host "Select server number (or 0 to cancel)"
@@ -739,7 +774,6 @@ function Create-RASService {
                 $agentName = "localhost"
                 Write-Host "Will connect to agent on port: $ctrlPort" -ForegroundColor Green
                 
-                # ============= ВАЖНОЕ ИСПРАВЛЕНИЕ =============
                 # Ищем платформу, соответствующую версии выбранного сервера
                 $rasPlatform = $platforms | Where-Object { 
                     $_.HasRAS -and $_.Version -eq $selectedServer.Version 
@@ -747,7 +781,7 @@ function Create-RASService {
                 
                 if(-not $rasPlatform) {
                     Write-Host ""
-                    Write-Host "WARNING: No RAS found for version $($selectedServer.Version)!" -ForegroundColor Red
+                    Write-Host "ERROR: No RAS found for version $($selectedServer.Version)!" -ForegroundColor Red
                     Write-Host "Available RAS versions:" -ForegroundColor Yellow
                     $platforms | Where-Object { $_.HasRAS } | ForEach-Object {
                         Write-Host "  - $($_.Version)" -ForegroundColor Gray
@@ -764,8 +798,6 @@ function Create-RASService {
                 } else {
                     Write-Host "Using RAS version: $($rasPlatform.Version) (matches agent)" -ForegroundColor Green
                 }
-                # =============================================
-                
             } else {
                 Write-Host "Invalid selection, using manual entry" -ForegroundColor Yellow
                 $ctrlPort = Read-Host "Enter agent port (default: 1540)"
@@ -773,25 +805,50 @@ function Create-RASService {
                 $agentName = Read-Host "Enter agent host (default: localhost)"
                 if([string]::IsNullOrWhiteSpace($agentName)){ $agentName = "localhost" }
                 
-                # Если выбрали ручной ввод, используем первую платформу с RAS
-                $rasPlatform = $platforms | Where-Object { $_.HasRAS } | Select-Object -First 1
+                # Пытаемся найти подходящую платформу
+                $rasPlatform = Get-RASPlatformByAgent -AgentPort $ctrlPort -Platforms $platforms -Servers $servers
+                
+                if(-not $rasPlatform) {
+                    $rasPlatform = $platforms | Where-Object { $_.HasRAS } | Select-Object -First 1
+                    Write-Host "Using first available RAS: $($rasPlatform.Version)" -ForegroundColor Yellow
+                }
             }
         } else {
+            # Ручной ввод
             $ctrlPort = Read-Host "Enter agent port (default: 1540)"
             if([string]::IsNullOrWhiteSpace($ctrlPort)){ $ctrlPort = "1540" }
             $agentName = Read-Host "Enter agent host (default: localhost)"
             if([string]::IsNullOrWhiteSpace($agentName)){ $agentName = "localhost" }
             
-            # Если выбрали ручной ввод, используем первую платформу с RAS
-            $rasPlatform = $platforms | Where-Object { $_.HasRAS } | Select-Object -First 1
+            # Пытаемся найти подходящую платформу
+            $rasPlatform = Get-RASPlatformByAgent -AgentPort $ctrlPort -Platforms $platforms -Servers $servers
+            
+            if(-not $rasPlatform) {
+                $useFallback = Read-Host "Use first available RAS version? (y/n)"
+                if($useFallback -eq 'y') {
+                    $rasPlatform = $platforms | Where-Object { $_.HasRAS } | Select-Object -First 1
+                    Write-Host "Using fallback RAS version: $($rasPlatform.Version)" -ForegroundColor Yellow
+                } else {
+                    Write-Host "Operation cancelled" -ForegroundColor Yellow
+                    return
+                }
+            }
         }
     } else {
+        # Нет серверов, ручной ввод
         $ctrlPort = Read-Host "Enter agent port (default: 1540)"
         if([string]::IsNullOrWhiteSpace($ctrlPort)){ $ctrlPort = "1540" }
         $agentName = Read-Host "Enter agent host (default: localhost)"
         if([string]::IsNullOrWhiteSpace($agentName)){ $agentName = "localhost" }
         
         $rasPlatform = $platforms | Where-Object { $_.HasRAS } | Select-Object -First 1
+        
+        if(-not $rasPlatform) {
+            Write-Host "No platform with RAS found!" -ForegroundColor Red
+            Write-Log "No platform with RAS found" "ERROR"
+            return
+        }
+        Write-Host "Using first available RAS: $($rasPlatform.Version)" -ForegroundColor Yellow
     }
     
     if(-not $rasPlatform) {
@@ -1108,7 +1165,7 @@ function Show-MainMenu {
     Clear-Host
     Write-Host "==================================" -ForegroundColor Cyan
     Write-Host "     1C SERVER MANAGER ULTIMATE    " -ForegroundColor White
-    Write-Host "            v2.0                   " -ForegroundColor DarkGray
+    Write-Host "            v3.0                   " -ForegroundColor DarkGray
     Write-Host "==================================" -ForegroundColor Cyan
     Write-Host ""
     Write-Host "=== 1C SERVER SERVICES ===" -ForegroundColor Yellow
