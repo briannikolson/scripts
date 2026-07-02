@@ -1,5 +1,5 @@
 # ============================================
-# 1C SERVER MANAGER - ULTIMATE EDITION v3.0
+# 1C SERVER MANAGER - ULTIMATE EDITION v21.0
 # ============================================
 
 # Проверка прав администратора
@@ -16,12 +16,6 @@ if (-NOT ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdent
 # ГЛОБАЛЬНЫЕ НАСТРОЙКИ
 # ============================================
 $Script:LogFile = "C:\1C_Server_Manager.log"
-$Script:BackupPath = "C:\1C_Backups"
-
-# Создаем папки для логов и бэкапов
-if(-not (Test-Path $Script:BackupPath)) {
-    New-Item -ItemType Directory -Force -Path $Script:BackupPath | Out-Null
-}
 
 # ============================================
 # ФУНКЦИИ ЛОГИРОВАНИЯ
@@ -67,10 +61,35 @@ function Test-PortAvailable {
         $tcpConnection = New-Object System.Net.Sockets.TcpClient
         $tcpConnection.Connect('127.0.0.1', $Port)
         $tcpConnection.Close()
-        return $false # Порт занят
+        return $false
     }
     catch {
-        return $true # Порт свободен
+        return $true
+    }
+}
+
+function Test-AgentConnection {
+    param(
+        [int]$Port,
+        [string]$Hostname = "localhost"
+    )
+    
+    Write-Host ""
+    Write-Host "Checking connection to agent on $Hostname`:$Port..." -ForegroundColor Yellow
+    
+    $agentCheck = Test-PortAvailable -Port $Port
+    
+    if($agentCheck) {
+        Write-Host "ERROR: Agent on port $Port is not responding!" -ForegroundColor Red
+        Write-Host ""
+        Write-Host "Possible reasons:" -ForegroundColor Yellow
+        Write-Host "1. 1C agent service is not running" -ForegroundColor Gray
+        Write-Host "2. Wrong port number" -ForegroundColor Gray
+        Write-Host "3. Firewall blocking the connection" -ForegroundColor Gray
+        return $false
+    } else {
+        Write-Host "Agent on port $Port is available!" -ForegroundColor Green
+        return $true
     }
 }
 
@@ -165,13 +184,14 @@ function Get-1CPlatforms {
                 $ras = Join-Path $_.FullName "bin\ras.exe"
                 
                 if(Test-Path $ragent){
+                    $hasRas = Test-Path $ras
                     $platforms += [PSCustomObject]@{
                         Version = $_.Name
                         Path = $_.FullName
                         Ragent = $ragent
-                        HasRAS = Test-Path $ras
+                        HasRAS = $hasRas
                     }
-                    Write-Host "    Found: $($_.Name) (RAS: $(Test-Path $ras))" -ForegroundColor Green
+                    Write-Host "    Found: $($_.Name) (RAS: $hasRas)" -ForegroundColor Green
                     Write-Log "Found platform: $($_.Name) at $($_.FullName)"
                 }
             }
@@ -620,12 +640,13 @@ function Change-1CServerPort {
 }
 
 # ============================================
-# РАС СЛУЖБЫ (ПОЛНОСТЬЮ ИСПРАВЛЕННАЯ ВЕРСИЯ)
+# РАС СЛУЖБЫ
 # ============================================
 
 function Get-RASServices {
     $services = Get-CimInstance Win32_Service | Where-Object {$_.PathName -match "ras\.exe"}
     
+    $result = @()
     foreach($svc in $services) {
         $rasPort = "unknown"
         if($svc.PathName -match "--port[= ](\d+)") {
@@ -646,11 +667,12 @@ function Get-RASServices {
             $agentPort = $matches[2]
         }
         
-        Add-Member -InputObject $svc -MemberType NoteProperty -Name "RASPort" -Value $rasPort -Force
-        Add-Member -InputObject $svc -MemberType NoteProperty -Name "AgentPort" -Value $agentPort -Force
+        $svc | Add-Member -MemberType NoteProperty -Name "RASPort" -Value $rasPort -Force
+        $svc | Add-Member -MemberType NoteProperty -Name "AgentPort" -Value $agentPort -Force
+        $result += $svc
     }
     
-    return $services
+    return $result
 }
 
 function Show-RASServices {
@@ -701,11 +723,9 @@ function Get-RASPlatformByAgent {
         [array]$Servers
     )
     
-    # Пытаемся найти сервер с таким портом
     $matchingServer = $Servers | Where-Object { $_.Port -eq $AgentPort } | Select-Object -First 1
     
     if($matchingServer) {
-        # Нашли сервер, ищем платформу с его версией
         $rasPlatform = $Platforms | Where-Object { 
             $_.HasRAS -and $_.Version -eq $matchingServer.Version 
         } | Select-Object -First 1
@@ -774,7 +794,10 @@ function Create-RASService {
                 $agentName = "localhost"
                 Write-Host "Will connect to agent on port: $ctrlPort" -ForegroundColor Green
                 
-                # Ищем платформу, соответствующую версии выбранного сервера
+                if(-not (Test-AgentConnection -Port ([int]$ctrlPort) -Hostname $agentName)) {
+                    return
+                }
+                
                 $rasPlatform = $platforms | Where-Object { 
                     $_.HasRAS -and $_.Version -eq $selectedServer.Version 
                 } | Select-Object -First 1
@@ -805,7 +828,10 @@ function Create-RASService {
                 $agentName = Read-Host "Enter agent host (default: localhost)"
                 if([string]::IsNullOrWhiteSpace($agentName)){ $agentName = "localhost" }
                 
-                # Пытаемся найти подходящую платформу
+                if(-not (Test-AgentConnection -Port ([int]$ctrlPort) -Hostname $agentName)) {
+                    return
+                }
+                
                 $rasPlatform = Get-RASPlatformByAgent -AgentPort $ctrlPort -Platforms $platforms -Servers $servers
                 
                 if(-not $rasPlatform) {
@@ -814,13 +840,15 @@ function Create-RASService {
                 }
             }
         } else {
-            # Ручной ввод
             $ctrlPort = Read-Host "Enter agent port (default: 1540)"
             if([string]::IsNullOrWhiteSpace($ctrlPort)){ $ctrlPort = "1540" }
             $agentName = Read-Host "Enter agent host (default: localhost)"
             if([string]::IsNullOrWhiteSpace($agentName)){ $agentName = "localhost" }
             
-            # Пытаемся найти подходящую платформу
+            if(-not (Test-AgentConnection -Port ([int]$ctrlPort) -Hostname $agentName)) {
+                return
+            }
+            
             $rasPlatform = Get-RASPlatformByAgent -AgentPort $ctrlPort -Platforms $platforms -Servers $servers
             
             if(-not $rasPlatform) {
@@ -835,11 +863,14 @@ function Create-RASService {
             }
         }
     } else {
-        # Нет серверов, ручной ввод
         $ctrlPort = Read-Host "Enter agent port (default: 1540)"
         if([string]::IsNullOrWhiteSpace($ctrlPort)){ $ctrlPort = "1540" }
         $agentName = Read-Host "Enter agent host (default: localhost)"
         if([string]::IsNullOrWhiteSpace($agentName)){ $agentName = "localhost" }
+        
+        if(-not (Test-AgentConnection -Port ([int]$ctrlPort) -Hostname $agentName)) {
+            return
+        }
         
         $rasPlatform = $platforms | Where-Object { $_.HasRAS } | Select-Object -First 1
         
@@ -857,12 +888,10 @@ function Create-RASService {
         return
     }
     
-    # Рекомендуем порт RAS = порт агента + 5
     $defaultRasPort = [int]$ctrlPort + 5
     $rasPort = Read-Host "Enter RAS port (default: $defaultRasPort)"
     if([string]::IsNullOrWhiteSpace($rasPort)){ $rasPort = $defaultRasPort.ToString() }
     
-    # Проверяем, свободен ли порт
     if(-not (Test-PortAvailable -Port ([int]$rasPort))) {
         Write-Host "Port $rasPort is already in use!" -ForegroundColor Red
         $existingRAS = Get-RASServices | Where-Object { $_.RASPort -eq $rasPort }
@@ -885,8 +914,13 @@ function Create-RASService {
     $rasPath = $rasPlatform.Ragent -replace "ragent.exe", "ras.exe"
     $arch = Get-1CArchitecture $rasPath
     
-    $serviceShortName = "1C_RAS_$rasPort"
+    $binary = "`"$rasPath`" cluster --service --port=$rasPort $agentName`:$ctrlPort"
+    
+    # Максимально информативное имя службы
+    $serviceShortName = "1C_RAS_$($rasPlatform.Version)_agent$ctrlPort"
+    
     $serviceDisplayName = "1C:Enterprise 8.3 ($($rasPlatform.Version)) RAS Agent ($arch) (agent:$ctrlPort, ras:$rasPort)"
+    $serviceDescription = "1C:Enterprise 8.3 RAS Agent ($arch) Parameters: port: $rasPort, monitored server: $agentName`:$ctrlPort"
     
     Write-Host ""
     Write-Host "=== СОЗДАНИЕ RAS СЛУЖБЫ ===" -ForegroundColor Cyan
@@ -894,17 +928,30 @@ function Create-RASService {
     Write-Host "Architecture: $arch" -ForegroundColor Gray
     Write-Host "Service name (short): $serviceShortName" -ForegroundColor Green
     Write-Host "Display name: $serviceDisplayName" -ForegroundColor Green
-    Write-Host "Agent: $agentName`:$ctrlPort" -ForegroundColor Gray
+    Write-Host "Description: $serviceDescription" -ForegroundColor Gray
+    Write-Host "Agent: $agentName`:$ctrlPort" -ForegroundColor Green
+    Write-Host "Agent status: Available ✓" -ForegroundColor Green
     Write-Host "RAS port: $rasPort" -ForegroundColor Gray
     Write-Host "RAS path: $rasPath" -ForegroundColor Gray
+    Write-Host "Command: $binary" -ForegroundColor DarkGray
+    
+    Write-Host ""
+    Write-Host "Enter credentials for RAS service:" -ForegroundColor Yellow
+    $useLocalSystem = Read-Host "Use LocalSystem account? (y/n) (default: y)"
+    if($useLocalSystem -eq 'n') {
+        $rasUserName = Read-Host "Enter username (format: DOMAIN\username or .\username)"
+        $rasUserPwd = Read-Host "Enter password" -AsSecureString
+        $rasUserPwdPlain = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto([System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($rasUserPwd))
+    } else {
+        $rasUserName = "LocalSystem"
+        $rasUserPwdPlain = ""
+    }
     
     $confirm = Read-Host "Create RAS service? (y/n)"
     if($confirm -ne 'y') {
         Write-Host "Operation cancelled" -ForegroundColor Yellow
         return
     }
-    
-    $binary = "`"$rasPath`" cluster --service --port=$rasPort $agentName`:$ctrlPort"
     
     try {
         $oldService = Get-Service -Name $serviceShortName -ErrorAction SilentlyContinue
@@ -916,14 +963,47 @@ function Create-RASService {
         }
         
         Write-Host "Creating RAS service..." -ForegroundColor Cyan
-        New-Service `
-            -Name $serviceShortName `
-            -BinaryPathName $binary `
-            -DisplayName $serviceDisplayName `
-            -StartupType Automatic `
-            -ErrorAction Stop
         
-        Write-Host "Service created successfully" -ForegroundColor Green
+        $scArgs = @(
+            "create", 
+            $serviceShortName, 
+            "binPath=", $binary, 
+            "start=", "auto", 
+            "error=", "ignore",
+            "displayname=", $serviceDisplayName
+        )
+        
+        if($rasUserName -ne "LocalSystem") {
+            $scArgs += "obj="
+            $scArgs += $rasUserName
+            $scArgs += "password="
+            $scArgs += $rasUserPwdPlain
+        }
+        
+        Write-Host "Running: sc $($scArgs -join ' ')" -ForegroundColor DarkGray
+        $scResult = & sc.exe $scArgs 2>&1
+        
+        if($LASTEXITCODE -ne 0) {
+            Write-Host "sc create failed, trying New-Service..." -ForegroundColor Yellow
+            
+            $newServiceParams = @{
+                Name = $serviceShortName
+                BinaryPathName = $binary
+                DisplayName = $serviceDisplayName
+                StartupType = "Automatic"
+                ErrorAction = "Stop"
+            }
+            
+            if($rasUserName -ne "LocalSystem") {
+                $newServiceParams.Credential = [PSCredential]::new($rasUserName, (ConvertTo-SecureString $rasUserPwdPlain -AsPlainText -Force))
+            }
+            
+            New-Service @newServiceParams
+        } else {
+            Write-Host "Service created successfully via sc" -ForegroundColor Green
+            sc.exe description $serviceShortName $serviceDescription
+        }
+        
         Write-Log "RAS service created: $serviceShortName on port $rasPort"
         
         Write-Host "Starting RAS service..." -ForegroundColor Yellow
@@ -952,6 +1032,15 @@ function Create-RASService {
     catch {
         Write-Host "Error creating service: $_" -ForegroundColor Red
         Write-Log "Error creating RAS service: $_" "ERROR"
+        
+        Write-Host ""
+        Write-Host "Try creating service manually:" -ForegroundColor Cyan
+        if($rasUserName -ne "LocalSystem") {
+            Write-Host "  sc create `"$serviceShortName`" binPath= `"$binary`" start= auto obj= `"$rasUserName`" password= `"****`" displayname= `"$serviceDisplayName`"" -ForegroundColor Gray
+        } else {
+            Write-Host "  sc create `"$serviceShortName`" binPath= `"$binary`" start= auto displayname= `"$serviceDisplayName`"" -ForegroundColor Gray
+        }
+        Write-Host "  Start-Service $serviceShortName" -ForegroundColor Gray
     }
 }
 
@@ -998,162 +1087,346 @@ function Delete-RASService {
 }
 
 # ============================================
-# МОНИТОРИНГ
+# ПОЛУЧЕНИЕ ИНФОРМАЦИИ ОБ ИНФОРМАЦИОННЫХ БАЗАХ (ОБЪЕДИНЕННАЯ ВЕРСИЯ)
 # ============================================
 
-function Monitor-1CServers {
-    param($RefreshInterval = 5)
+function Get-RACPath {
+    $platforms = Get-1CPlatforms
+    $rasPlatform = $platforms | Where-Object { $_.HasRAS } | Select-Object -First 1
     
-    Clear-Host
-    Write-Host "Monitoring 1C Servers (Press Ctrl+C to stop)" -ForegroundColor Cyan
-    Write-Host "Updates every $RefreshInterval seconds" -ForegroundColor Gray
-    Write-Host "=" * 50
-    Write-Host ""
+    if(-not $rasPlatform) {
+        Write-Host "Platform with RAS not found!" -ForegroundColor Red
+        return $null
+    }
     
-    while($true) {
-        Clear-Host
-        Write-Host "=== 1C SERVER MONITOR ===" -ForegroundColor Cyan
-        Write-Host "Last update: $(Get-Date -Format 'HH:mm:ss')" -ForegroundColor Gray
-        Write-Host "Press Ctrl+C to stop monitoring" -ForegroundColor Yellow
-        Write-Host ""
+    $racPath = $rasPlatform.Ragent -replace "ragent.exe", "rac.exe"
+    
+    if(-not (Test-Path $racPath)) {
+        Write-Host "RAC executable not found: $racPath" -ForegroundColor Red
+        return $null
+    }
+    
+    return $racPath
+}
+
+function Get-InfobasesFromRAS {
+    param(
+        [string]$RASPort = "1545",
+        [string]$Server = "localhost"
+    )
+    
+    $racPath = Get-RACPath
+    if(-not $racPath) {
+        return $null
+    }
+    
+    try {
+        Write-Host "Connecting to RAS port $RASPort..." -ForegroundColor Gray
         
-        $servers = Get-1CServerMap
+        $testConnection = Test-PortAvailable -Port ([int]$RASPort)
+        if($testConnection) {
+            Write-Host "Port $RASPort is not responding, skipping..." -ForegroundColor Red
+            return $null
+        }
         
-        if(-not $servers) {
-            Write-Host "No servers found" -ForegroundColor Yellow
-        } else {
-            foreach($srv in $servers) {
-                $statusColor = if($srv.State -eq "Running") { "Green" } else { "Red" }
-                Write-Host "Port $($srv.Port):" -ForegroundColor Yellow
-                Write-Host "  Service: $($srv.Service)" -ForegroundColor Gray
-                Write-Host "  Status: " -NoNewline
-                Write-Host "$($srv.State)" -ForegroundColor $statusColor
-                Write-Host "  Version: $($srv.Version)" -ForegroundColor Gray
-                Write-Host "  Data dir: $($srv.SrvInfo)" -ForegroundColor DarkGray
-                
-                if($srv.State -eq "Running") {
-                    $portAvailable = Test-PortAvailable -Port ([int]$srv.Port)
-                    if($portAvailable) {
-                        Write-Host "  Port: NOT RESPONDING!" -ForegroundColor Red
-                    } else {
-                        Write-Host "  Port: OK" -ForegroundColor Green
-                    }
-                }
-                Write-Host ""
+        # Получаем список кластеров
+        $clusterCommands = @(
+            "cluster list --port=$RASPort $Server",
+            "cluster list $Server`:$RASPort"
+        )
+        
+        $clustersOutput = $null
+        foreach($cmd in $clusterCommands) {
+            $cmdParts = $cmd.Split(' ')
+            $testOutput = & $racPath $cmdParts 2>&1
+            if($LASTEXITCODE -eq 0 -and $testOutput -match "cluster") {
+                $clustersOutput = $testOutput
+                break
             }
         }
         
-        Start-Sleep -Seconds $RefreshInterval
+        if(-not $clustersOutput) {
+            Write-Host "No clusters found on port $RASPort" -ForegroundColor Yellow
+            return $null
+        }
+        
+        if($clustersOutput -is [array]) {
+            $outputString = $clustersOutput -join "`n"
+        } else {
+            $outputString = $clustersOutput.ToString()
+        }
+        
+        # Ищем cluster ID
+        $guidPattern = '[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}'
+        $clusterMatches = [regex]::Matches($outputString, $guidPattern)
+        
+        if($clusterMatches.Count -eq 0) {
+            Write-Host "No cluster IDs found on port $RASPort" -ForegroundColor Yellow
+            return $null
+        }
+        
+        $allInfobases = @()
+        
+        foreach($match in $clusterMatches) {
+            $clusterId = $match.Value
+            
+            # Получаем список инфобаз (v20.3 - показывает имена)
+            $infobaseCommands = @(
+                "infobase summary list --port=$RASPort $Server --cluster=$clusterId",
+                "infobase summary list $Server`:$RASPort --cluster=$clusterId"
+            )
+            
+            $infobasesOutput = $null
+            foreach($cmd in $infobaseCommands) {
+                $cmdParts = $cmd.Split(' ')
+                $testOutput = & $racPath $cmdParts 2>&1
+                if($LASTEXITCODE -eq 0) {
+                    $infobasesOutput = $testOutput
+                    break
+                }
+            }
+            
+            if(-not $infobasesOutput) {
+                continue
+            }
+            
+            if($infobasesOutput -is [array]) {
+                $infobasesString = $infobasesOutput -join "`n"
+            } else {
+                $infobasesString = $infobasesOutput.ToString()
+            }
+            
+            if($infobasesString -match "infobase" -and $infobasesString -notmatch "No infobases found") {
+                # Парсим инфобазы (получаем имена как в v20.3)
+                $infobaseLines = $infobasesString -split "`n"
+                $currentInfobase = @{}
+                $infobaseId = $null
+                
+                foreach($line in $infobaseLines) {
+                    if($line -match "^\s*infobase\s*:\s*([a-f0-9\-]+)") {
+                        # Сохраняем предыдущую инфобазу
+                        if($currentInfobase.Count -gt 0 -and $infobaseId) {
+                            $currentInfobase["infobase"] = $infobaseId
+                            $currentInfobase["cluster"] = $clusterId
+                            $allInfobases += $currentInfobase
+                        }
+                        $infobaseId = $matches[1]
+                        $currentInfobase = @{}
+                    }
+                    elseif($line -match "^\s*(name|descr)\s*:\s*(.+)$") {
+                        $key = $matches[1].Trim()
+                        $value = $matches[2].Trim()
+                        $currentInfobase[$key] = $value
+                    }
+                }
+                
+                # Добавляем последнюю инфобазу
+                if($currentInfobase.Count -gt 0 -and $infobaseId) {
+                    $currentInfobase["infobase"] = $infobaseId
+                    $currentInfobase["cluster"] = $clusterId
+                    $allInfobases += $currentInfobase
+                }
+            }
+        }
+        
+        # Теперь для каждой инфобазы получаем дополнительную информацию (v20.4)
+        $enhancedInfobases = @()
+        foreach($infobase in $allInfobases) {
+            $infobaseId = $infobase["infobase"]
+            $clusterId = $infobase["cluster"]
+            
+            # Получаем детальную информацию
+            $detailCommands = @(
+                "infobase info --port=$RASPort $Server --cluster=$clusterId --infobase=$infobaseId",
+                "infobase info $Server`:$RASPort --cluster=$clusterId --infobase=$infobaseId"
+            )
+            
+            $detailOutput = $null
+            foreach($cmd in $detailCommands) {
+                $cmdParts = $cmd.Split(' ')
+                $testOutput = & $racPath $cmdParts 2>&1
+                if($LASTEXITCODE -eq 0) {
+                    $detailOutput = $testOutput
+                    break
+                }
+            }
+            
+            if($detailOutput) {
+                if($detailOutput -is [array]) {
+                    $detailString = $detailOutput -join "`n"
+                } else {
+                    $detailString = $detailOutput.ToString()
+                }
+                
+                # Парсим детальную информацию
+                $detailLines = $detailString -split "`n"
+                foreach($line in $detailLines) {
+                    if($line -match "^\s*(dbms|db-server|db-name|security-level|sessions-deny|scheduled-jobs-deny|license-distribution)\s*:\s*(.+)$") {
+                        $key = $matches[1].Trim()
+                        $value = $matches[2].Trim()
+                        $infobase[$key] = $value
+                    }
+                }
+            }
+            
+            $enhancedInfobases += $infobase
+        }
+        
+        if($enhancedInfobases.Count -gt 0) {
+            return $enhancedInfobases
+        }
+        
+        return $null
+    }
+    catch {
+        Write-Host ("Error on port {0}: {1}" -f $RASPort, $_) -ForegroundColor Red
+        return $null
     }
 }
 
-# ============================================
-# БЭКАП КОНФИГУРАЦИИ
-# ============================================
-
-function Backup-1CServerConfig {
-    $servers = Get-1CServerMap
+function Show-Infobases {
+    $rasServices = Get-RASServices
     
-    if(-not $servers) {
-        Write-Host "No servers found" -ForegroundColor Yellow
+    if(-not $rasServices) {
+        Write-Host "No RAS services found!" -ForegroundColor Red
+        Write-Host "Please create RAS service first (option 9)" -ForegroundColor Yellow
         return
     }
     
     Write-Host ""
-    Write-Host "Select server to backup (or 0 to cancel)"
-    Write-Host "========================================"
+    Write-Host "=== ВЫБОР RAS СЛУЖБЫ ===" -ForegroundColor Cyan
+    Write-Host ""
     
     $i = 1
-    foreach($srv in $servers){
-        Write-Host "$i) Port $($srv.Port) - $($srv.Version) - State: $($srv.State)"
+    foreach($svc in $rasServices) {
+        Write-Host "$i) $($svc.Name) - RAS Port: $($svc.RASPort) - Status: $($svc.State)" -ForegroundColor $(if($svc.State -eq "Running"){"Green"}else{"Yellow"})
         $i++
     }
-    Write-Host "0) Return to main menu"
+    Write-Host "$i) ALL RAS services (search all)" -ForegroundColor Cyan
+    Write-Host "0) Return"
     
     $choice = Read-Host "Select number"
-    
     if($choice -eq "0") {
-        Write-Host "Operation cancelled" -ForegroundColor Yellow
         return
     }
     
-    $srv = $servers[$choice-1]
+    Clear-Host
+    Write-Host ""
+    Write-Host "=== ИНФОРМАЦИОННЫЕ БАЗЫ ===" -ForegroundColor Cyan
     
-    if(-not $srv) {
-        Write-Host "Invalid selection" -ForegroundColor Red
-        return
-    }
-    
-    $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
-    $backupDir = Join-Path $Script:BackupPath "1C_Server_$($srv.Port)_$timestamp"
-    
-    try {
-        New-Item -ItemType Directory -Force -Path $backupDir | Out-Null
-        Write-Host "Creating backup in: $backupDir" -ForegroundColor Cyan
+    if($choice -eq $rasServices.Count + 1) {
+        Write-Host "Searching all RAS services..." -ForegroundColor Gray
         
-        $srv | Export-Csv -Path (Join-Path $backupDir "server_info.csv") -NoTypeInformation -Encoding UTF8
+        $allPorts = @()
+        foreach($svc in $rasServices) {
+            if($svc.RASPort -and $svc.RASPort -ne "unknown") {
+                $allPorts += $svc.RASPort
+            }
+        }
+        $allPorts = $allPorts | Select-Object -Unique
         
-        $service = Get-WmiObject Win32_Service | Where-Object {$_.Name -eq $srv.Service}
-        if($service) {
-            $service | Export-Csv -Path (Join-Path $backupDir "service_config.csv") -NoTypeInformation -Encoding UTF8
+        $allInfobases = @()
+        foreach($port in $allPorts) {
+            Write-Host ""
+            Write-Host "Checking RAS port: $port" -ForegroundColor Yellow
+            $result = Get-InfobasesFromRAS -RASPort $port
+            if($result) {
+                $allInfobases += $result
+            }
         }
         
-        $regPath = "HKLM:\SOFTWARE\1C\1Cv8\$($srv.Version)"
-        if(Test-Path $regPath) {
-            reg export "$regPath" (Join-Path $backupDir "registry_backup.reg") /y 2>$null
-            Write-Host "Registry settings saved" -ForegroundColor Gray
+        if($allInfobases.Count -gt 0) {
+            Write-Host ""
+            Write-Host "Infobases found:" -ForegroundColor Green
+            Write-Host ""
+            
+            $idx = 1
+            foreach($item in $allInfobases) {
+                if($item -is [hashtable]) {
+                    # Используем имя из summary (v20.3) или ID если нет имени
+                    $name = if($item["name"]) { $item["name"] } else { $item["infobase"] }
+                    $descr = if($item["descr"]) { $item["descr"] } else { "" }
+                    $dbms = if($item["dbms"]) { $item["dbms"] } else { "Unknown" }
+                    $dbServer = if($item["db-server"]) { $item["db-server"] } else { "N/A" }
+                    $dbName = if($item["db-name"]) { $item["db-name"] } else { "N/A" }
+                    $securityLevel = if($item["security-level"]) { $item["security-level"] } else { "N/A" }
+                    $sessionsDeny = if($item["sessions-deny"]) { $item["sessions-deny"] } else { "N/A" }
+                    $infobaseId = $item["infobase"]
+                    
+                    Write-Host "$idx) " -NoNewline -ForegroundColor Yellow
+                    Write-Host "$name" -ForegroundColor Green
+                    Write-Host "   ID: $infobaseId" -ForegroundColor Gray
+                    if($descr) {
+                        Write-Host "   Description: $descr" -ForegroundColor Gray
+                    }
+                    Write-Host "   DBMS: $dbms" -ForegroundColor Cyan
+                    Write-Host "   DB Server: $dbServer" -ForegroundColor Cyan
+                    Write-Host "   DB Name: $dbName" -ForegroundColor Cyan
+                    Write-Host "   Security Level: $securityLevel" -ForegroundColor Yellow
+                    Write-Host "   Sessions Deny: $sessionsDeny" -ForegroundColor $(if($sessionsDeny -eq "on"){"Red"}else{"Green"})
+                    Write-Host ""
+                    $idx++
+                }
+            }
+        } else {
+            Write-Host "No infobases found" -ForegroundColor Yellow
         }
-        
-        $logPath = Join-Path $srv.SrvInfo "log"
-        if(Test-Path $logPath) {
-            Copy-Item -Path $logPath -Destination (Join-Path $backupDir "logs") -Recurse -Force -ErrorAction SilentlyContinue
-            Write-Host "Log files copied" -ForegroundColor Gray
-        }
-        
-        $info = @"
-Server Backup Information
-=========================
-Server Port: $($srv.Port)
-Version: $($srv.Version)
-Service Name: $($srv.Service)
-Data Directory: $($srv.SrvInfo)
-Backup Date: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
-"@
-        $info | Out-File -FilePath (Join-Path $backupDir "backup_info.txt") -Encoding UTF8
-        
-        Write-Host ""
-        Write-Host "Backup completed successfully!" -ForegroundColor Green
-        Write-Host "Backup location: $backupDir" -ForegroundColor Green
-        Write-Log "Backup created for server on port $($srv.Port) at $backupDir"
-    }
-    catch {
-        Write-Host "Error creating backup: $_" -ForegroundColor Red
-        Write-Log "Error creating backup: $_" "ERROR"
-    }
-}
-
-# ============================================
-# ФУНКЦИИ РАБОТЫ С ЛОГОМ
-# ============================================
-
-function Show-Log {
-    if(Test-Path $Script:LogFile) {
-        Write-Host ""
-        Write-Host "=== LOG FILE ===" -ForegroundColor Cyan
-        Write-Host "Last 50 entries:" -ForegroundColor Yellow
-        Write-Host ""
-        Get-Content $Script:LogFile -Tail 50
     } else {
-        Write-Host "Log file not found" -ForegroundColor Yellow
-    }
-}
-
-function Clear-Log {
-    $confirm = Read-Host "Clear log file? (y/n)"
-    if($confirm -eq 'y') {
-        Remove-Item $Script:LogFile -Force -ErrorAction SilentlyContinue
-        Write-Host "Log cleared" -ForegroundColor Green
-        Write-Log "Log cleared by user"
+        $selectedService = $rasServices[$choice-1]
+        if(-not $selectedService) {
+            Write-Host "Invalid selection" -ForegroundColor Red
+            return
+        }
+        
+        if($selectedService.State -ne "Running") {
+            Write-Host "RAS service is not running!" -ForegroundColor Red
+            $start = Read-Host "Start it? (y/n)"
+            if($start -eq 'y') {
+                Start-Service $selectedService.Name
+                Start-Sleep -Seconds 3
+            } else {
+                return
+            }
+        }
+        
+        Write-Host "RAS: localhost:$($selectedService.RASPort)" -ForegroundColor Gray
+        $result = Get-InfobasesFromRAS -RASPort $selectedService.RASPort
+        
+        if($result) {
+            Write-Host ""
+            Write-Host "Infobases found:" -ForegroundColor Green
+            Write-Host ""
+            
+            $idx = 1
+            foreach($item in $result) {
+                if($item -is [hashtable]) {
+                    $name = if($item["name"]) { $item["name"] } else { $item["infobase"] }
+                    $descr = if($item["descr"]) { $item["descr"] } else { "" }
+                    $dbms = if($item["dbms"]) { $item["dbms"] } else { "Unknown" }
+                    $dbServer = if($item["db-server"]) { $item["db-server"] } else { "N/A" }
+                    $dbName = if($item["db-name"]) { $item["db-name"] } else { "N/A" }
+                    $securityLevel = if($item["security-level"]) { $item["security-level"] } else { "N/A" }
+                    $sessionsDeny = if($item["sessions-deny"]) { $item["sessions-deny"] } else { "N/A" }
+                    $infobaseId = $item["infobase"]
+                    
+                    Write-Host "$idx) " -NoNewline -ForegroundColor Yellow
+                    Write-Host "$name" -ForegroundColor Green
+                    Write-Host "   ID: $infobaseId" -ForegroundColor Gray
+                    if($descr) {
+                        Write-Host "   Description: $descr" -ForegroundColor Gray
+                    }
+                    Write-Host "   DBMS: $dbms" -ForegroundColor Cyan
+                    Write-Host "   DB Server: $dbServer" -ForegroundColor Cyan
+                    Write-Host "   DB Name: $dbName" -ForegroundColor Cyan
+                    Write-Host "   Security Level: $securityLevel" -ForegroundColor Yellow
+                    Write-Host "   Sessions Deny: $sessionsDeny" -ForegroundColor $(if($sessionsDeny -eq "on"){"Red"}else{"Green"})
+                    Write-Host ""
+                    $idx++
+                }
+            }
+        } else {
+            Write-Host "No infobases found" -ForegroundColor Yellow
+        }
     }
 }
 
@@ -1165,7 +1438,7 @@ function Show-MainMenu {
     Clear-Host
     Write-Host "==================================" -ForegroundColor Cyan
     Write-Host "     1C SERVER MANAGER ULTIMATE    " -ForegroundColor White
-    Write-Host "            v3.0                   " -ForegroundColor DarkGray
+    Write-Host "            v21.0                  " -ForegroundColor DarkGray
     Write-Host "==================================" -ForegroundColor Cyan
     Write-Host ""
     Write-Host "=== 1C SERVER SERVICES ===" -ForegroundColor Yellow
@@ -1182,13 +1455,8 @@ function Show-MainMenu {
     Write-Host " 9 - Create RAS service"
     Write-Host "10 - Delete RAS service"
     Write-Host ""
-    Write-Host "=== MONITORING & BACKUP ===" -ForegroundColor Yellow
-    Write-Host "11 - Monitor servers"
-    Write-Host "12 - Backup server config"
-    Write-Host ""
-    Write-Host "=== SYSTEM ===" -ForegroundColor Yellow
-    Write-Host "13 - Show log"
-    Write-Host "14 - Clear log"
+    Write-Host "=== INFO BASES ===" -ForegroundColor Yellow
+    Write-Host "11 - Show infobases (with full info)"
     Write-Host ""
     Write-Host "0 - Exit"
     Write-Host ""
@@ -1250,19 +1518,7 @@ do {
         }
         "11" {
             Clear-Host
-            Monitor-1CServers
-        }
-        "12" {
-            Clear-Host
-            Backup-1CServerConfig
-        }
-        "13" {
-            Clear-Host
-            Show-Log
-        }
-        "14" {
-            Clear-Host
-            Clear-Log
+            Show-Infobases
         }
         "0" { 
             Clear-Host
@@ -1276,7 +1532,7 @@ do {
         }
     }
     
-    if($choice -ne "0" -and $choice -ne "11"){
+    if($choice -ne "0"){
         WaitForKeyPress
     }
     
