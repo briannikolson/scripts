@@ -1,5 +1,5 @@
 # ============================================
-# 1C SERVER MANAGER - ULTIMATE EDITION v27.12
+# 1C SERVER MANAGER
 # ============================================
 
 # Проверка прав администратора
@@ -1812,15 +1812,347 @@ function Show-InfobasesViaRAS {
 }
 
 # ============================================
+# НАСТРОЙКА COM-СОЕДИНЕНИЯ 1С
+# ============================================
+
+function Setup-1CCOMConnection {
+    Clear-Host
+    Write-Host "==============================================" -ForegroundColor Cyan
+    Write-Host "       НАСТРОЙКА COM-СОЕДИНЕНИЯ 1С          " -ForegroundColor White
+    Write-Host "==============================================" -ForegroundColor Cyan
+    Write-Host ""
+    
+    Write-Host "This function will:" -ForegroundColor Yellow
+    Write-Host "  1. Find all installed 1C platforms" -ForegroundColor Gray
+    Write-Host "  2. Let you select a platform" -ForegroundColor Gray
+    Write-Host "  3. Register comcntr.dll" -ForegroundColor Gray
+    Write-Host "  4. Create and configure COM+ application V83COMConnector" -ForegroundColor Gray
+    Write-Host ""
+    
+    # 1. Поиск платформ
+    Write-Host "Searching for 1C platforms..." -ForegroundColor Cyan
+    $platforms = Get-1CPlatforms
+    
+    if(-not $platforms -or $platforms.Count -eq 0) {
+        Write-Host "ERROR: No 1C platforms found!" -ForegroundColor Red
+        Write-Host "Make sure 1C:Enterprise is installed." -ForegroundColor Yellow
+        Write-Log "No 1C platforms found for COM setup" "ERROR"
+        return
+    }
+    
+    Write-Host "Found $($platforms.Count) platform(s)" -ForegroundColor Green
+    Write-Host ""
+    
+    # 2. Выбор платформы
+    Write-Host "Select 1C platform (or 0 to cancel):" -ForegroundColor Yellow
+    Write-Host "====================================="
+    
+    $i = 1
+    foreach($p in $platforms) {
+        $arch = Get-1CArchitecture $p.Ragent
+        $rasIcon = if($p.HasRAS) { "[RAS available]" } else { "[No RAS]" }
+        Write-Host "$i) Version: $($p.Version) [$arch] $rasIcon" -ForegroundColor Green
+        Write-Host "   Path: $($p.Path)" -ForegroundColor Gray
+        $i++
+    }
+    Write-Host "0) Cancel"
+    
+    $choice = Read-Host "Select number"
+    
+    if($choice -eq "0") {
+        Write-Host "Operation cancelled" -ForegroundColor Yellow
+        return
+    }
+    
+    $selectedPlatform = $platforms[$choice-1]
+    if(-not $selectedPlatform) {
+        Write-Host "Invalid selection" -ForegroundColor Red
+        return
+    }
+    
+    Write-Host ""
+    Write-Host "Selected platform:" -ForegroundColor Green
+    Write-Host "  Version: $($selectedPlatform.Version)" -ForegroundColor Yellow
+    Write-Host "  Path: $($selectedPlatform.Path)" -ForegroundColor Gray
+    Write-Host ""
+    
+    $confirm = Read-Host "Continue with this platform? (y/n)"
+    if($confirm -ne 'y') {
+        Write-Host "Operation cancelled" -ForegroundColor Yellow
+        return
+    }
+    
+    $binPath = Join-Path $selectedPlatform.Path "bin"
+    $comcntrPath = Join-Path $binPath "comcntr.dll"
+    
+    if(-not (Test-Path $comcntrPath)) {
+        Write-Host "ERROR: comcntr.dll not found at: $comcntrPath" -ForegroundColor Red
+        Write-Log "comcntr.dll not found at: $comcntrPath" "ERROR"
+        return
+    }
+    
+    Write-Host ""
+    Write-Host "=== РЕГИСТРАЦИЯ БИБЛИОТЕКИ ===" -ForegroundColor Cyan
+    Write-Host "File: $comcntrPath" -ForegroundColor Gray
+    
+    # Регистрация библиотеки
+    $regsvr32Path = "C:\Windows\SysWOW64\regsvr32.exe"
+    if(-not (Test-Path $regsvr32Path)) {
+        Write-Warning "regsvr32 (32-bit) not found. Using system regsvr32."
+        $regsvr32Path = "regsvr32.exe"
+    }
+    
+    Write-Host "Registering comcntr.dll..." -ForegroundColor Yellow
+    $process = Start-Process -FilePath $regsvr32Path -ArgumentList "/s `"$comcntrPath`"" -Wait -PassThru
+    
+    if($process.ExitCode -eq 0) {
+        Write-Host "Library registered successfully!" -ForegroundColor Green
+        $regSuccess = $true
+    } else {
+        Write-Warning "Registration failed (code: $($process.ExitCode)). Attempting re-registration..."
+        
+        # Попытка удаления старой регистрации
+        Write-Host "Removing old registration..." -ForegroundColor Yellow
+        $unregProcess = Start-Process -FilePath $regsvr32Path -ArgumentList "/u /s `"$comcntrPath`"" -Wait -PassThru
+        
+        if($unregProcess.ExitCode -eq 0) {
+            Write-Host "Old registration removed." -ForegroundColor Yellow
+        } else {
+            Write-Warning "Failed to remove old registration (code: $($unregProcess.ExitCode))."
+        }
+        
+        # Повторная регистрация
+        Write-Host "Re-registering..." -ForegroundColor Yellow
+        $regProcess2 = Start-Process -FilePath $regsvr32Path -ArgumentList "/s `"$comcntrPath`"" -Wait -PassThru
+        
+        if($regProcess2.ExitCode -eq 0) {
+            Write-Host "Library re-registered successfully!" -ForegroundColor Green
+            $regSuccess = $true
+        } else {
+            Write-Error "Failed to register library (code: $($regProcess2.ExitCode))"
+            $regSuccess = $false
+        }
+    }
+    
+    if(-not $regSuccess) {
+        Write-Host ""
+        Write-Host "WARNING: Library registration failed." -ForegroundColor Red
+        Write-Host "You can try manual registration:" -ForegroundColor Yellow
+        Write-Host "  $regsvr32Path `"$comcntrPath`"" -ForegroundColor Gray
+        $continue = Read-Host "Continue with COM+ setup anyway? (y/n)"
+        if($continue -ne 'y') {
+            Write-Host "Operation cancelled" -ForegroundColor Yellow
+            return
+        }
+    }
+    
+    # Создание COM+ приложения
+    Write-Host ""
+    Write-Host "=== СОЗДАНИЕ COM+ ПРИЛОЖЕНИЯ ===" -ForegroundColor Cyan
+    
+    $createApp = Read-Host "Create COM+ application 'V83COMConnector'? (y/n)"
+    if($createApp -ne 'y') {
+        Write-Host "COM+ application creation skipped." -ForegroundColor Yellow
+        Write-Host ""
+        Write-Host "=== COM SETUP COMPLETED ===" -ForegroundColor Green
+        Write-Host "Library registered successfully." -ForegroundColor Green
+        Write-Host "You can manually create COM+ application if needed." -ForegroundColor Yellow
+        Write-Log "COM library registered for version $($selectedPlatform.Version)"
+        return
+    }
+    
+    # Настройка учетной записи
+    Write-Host ""
+    Write-Host "Configure service account for COM+ application:" -ForegroundColor Yellow
+    $useCurrentUser = Read-Host "Use current user account? (y/n) (default: y)"
+    
+    if($useCurrentUser -eq 'n') {
+        $account = Read-Host "Enter username (format: DOMAIN\username or .\username)"
+        if([string]::IsNullOrWhiteSpace($account)) {
+            Write-Host "Using current user account as fallback." -ForegroundColor Yellow
+            $account = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+        }
+    } else {
+        $account = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+    }
+    
+    Write-Host "Will use account: $account" -ForegroundColor Green
+    
+    try {
+        # Подключение к каталогу COM+
+        Write-Host "Connecting to COM+ catalog..." -ForegroundColor Gray
+        $comAdmin = New-Object -ComObject COMAdmin.COMAdminCatalog
+        $catalogCollection = $comAdmin.GetCollection("Applications")
+        $catalogCollection.Populate()
+        
+        $appName = "V83COMConnector"
+        
+        # Проверка существующего приложения
+        $existingApp = $null
+        $existingIndex = -1
+        
+        for ($idx = 0; $idx -lt $catalogCollection.Count; $idx++) {
+            $app = $catalogCollection.Item($idx)
+            if ($app.Name -eq $appName) {
+                $existingApp = $app
+                $existingIndex = $idx
+                break
+            }
+        }
+        
+        if($existingApp) {
+            Write-Host ""
+            Write-Host "Application '$appName' already exists." -ForegroundColor Yellow
+            $deleteChoice = Read-Host "Delete and recreate? (y/n)"
+            if($deleteChoice -eq 'y') {
+                Write-Host "Removing existing application..." -ForegroundColor Yellow
+                # Используем индекс для удаления
+                $catalogCollection.Remove($existingIndex)
+                $catalogCollection.SaveChanges()
+                $catalogCollection.Populate()
+                Write-Host "Application removed." -ForegroundColor Green
+            } else {
+                Write-Host "Keeping existing application." -ForegroundColor Yellow
+                Write-Host ""
+                Write-Host "=== COM SETUP COMPLETED ===" -ForegroundColor Green
+                Write-Host "Library registered successfully." -ForegroundColor Green
+                Write-Host "COM+ application already exists." -ForegroundColor Yellow
+                Write-Log "COM library registered, application already exists"
+                return
+            }
+        }
+        
+        # Создание нового приложения
+        Write-Host "Creating new COM+ application..." -ForegroundColor Yellow
+        $newApp = $catalogCollection.Add()
+        $newApp.Name = $appName
+        $newApp.Description = "COM-соединение для 1С:Предприятие"
+        $newApp.ApplicationAccessChecksEnabled = $false
+        $newApp.Authentication = 0
+        $newApp.Activation = 1
+        $newApp.QueueEnabled = $false
+        $newApp.ServerProcessShutdownTimeout = 0
+        $newApp.Identity = $account
+        
+        $catalogCollection.SaveChanges()
+        Write-Host "Application '$appName' created." -ForegroundColor Green
+        
+        # Получаем обновленную коллекцию для поиска приложения
+        $appCollection = $comAdmin.GetCollection("Applications")
+        $appCollection.Populate()
+        
+        # Находим созданное приложение по имени
+        $app = $null
+        $appIndex = -1
+        for ($idx = 0; $idx -lt $appCollection.Count; $idx++) {
+            $currentApp = $appCollection.Item($idx)
+            if ($currentApp.Name -eq $appName) {
+                $app = $currentApp
+                $appIndex = $idx
+                break
+            }
+        }
+        
+        if(-not $app) {
+            throw "Failed to find created application."
+        }
+        
+        # Добавление компонента
+        Write-Host "Adding component from comcntr.dll..." -ForegroundColor Yellow
+        
+        $componentsCollection = $appCollection.GetCollection("Components", $appIndex)
+        $componentsCollection.Populate()
+        
+        $newComponent = $componentsCollection.Add()
+        $newComponent.CLSID = "{E9D16D2F-D386-4C0F-9D98-C5DF5F0E42E9}"
+        $newComponent.Dll = $comcntrPath
+        $newComponent.TypeLibrary = $comcntrPath
+        $newComponent.Transaction = 0
+        $newComponent.Concurrency = 1
+        $newComponent.MustRunInClientContext = $false
+        $newComponent.IsPrivateComponent = $true
+        
+        $componentsCollection.SaveChanges()
+        Write-Host "Component added successfully." -ForegroundColor Green
+        
+        # Настройка безопасности - обновляем приложение
+        $appCollection.Populate()
+        
+        # Находим приложение снова для настройки безопасности
+        $appForSecurity = $null
+        $securityIndex = -1
+        for ($idx = 0; $idx -lt $appCollection.Count; $idx++) {
+            $currentApp = $appCollection.Item($idx)
+            if ($currentApp.Name -eq $appName) {
+                $appForSecurity = $currentApp
+                $securityIndex = $idx
+                break
+            }
+        }
+        
+        if($appForSecurity) {
+            Write-Host "Configuring security settings..." -ForegroundColor Yellow
+            
+            $appForSecurity.ApplicationAccessChecksEnabled = $false
+            $appForSecurity.AccessChecksLevel = 0
+            $appForSecurity.AuthenticationCapabilities = 0x1000
+            $appForSecurity.SoapActivated = $false
+            $appForSecurity.Authentication = 0
+            $appForSecurity.ImpersonationLevel = 2
+            
+            $appCollection.SaveChanges()
+            Write-Host "Security settings configured." -ForegroundColor Green
+        }
+        
+        Write-Host ""
+        Write-Host "=== COM+ APPLICATION CREATED SUCCESSFULLY ===" -ForegroundColor Green
+        Write-Host "Application name: $appName" -ForegroundColor Green
+        Write-Host "Account: $account" -ForegroundColor Gray
+        Write-Host "Component: $comcntrPath" -ForegroundColor Gray
+        
+        Write-Log "COM+ application $appName created successfully for version $($selectedPlatform.Version)"
+        
+        # Открытие оснастки для проверки
+        Write-Host ""
+        $openMmc = Read-Host "Open Component Services for verification? (y/n)"
+        if($openMmc -eq 'y') {
+            Start-Process "comexp.msc"
+            Write-Host "Component Services opened." -ForegroundColor Green
+        }
+        
+    } catch {
+        Write-Host ""
+        Write-Error "Error creating COM+ application: $_"
+        Write-Log "Error creating COM+ application: $_" "ERROR"
+        
+        Write-Host ""
+        Write-Host "Manual setup instructions:" -ForegroundColor Cyan
+        Write-Host "1. Open 'Component Services' (comexp.msc)" -ForegroundColor Gray
+        Write-Host "2. Create new COM+ application named '$appName'" -ForegroundColor Gray
+        Write-Host "3. Add component from: $comcntrPath" -ForegroundColor Gray
+        Write-Host "4. Configure security (disable access checks)" -ForegroundColor Gray
+        Write-Host "5. Set identity to: $account" -ForegroundColor Gray
+    }
+    
+    Write-Host ""
+    Write-Host "=== COM SETUP COMPLETED ===" -ForegroundColor Green
+    Write-Host ""
+    Write-Host "Recommendations:" -ForegroundColor Yellow
+    Write-Host "1. Restart 1C services if needed" -ForegroundColor Gray
+    Write-Host "2. Test COM connection in 1C:Enterprise" -ForegroundColor Gray
+    Write-Host "3. Run this script on workstations if needed" -ForegroundColor Gray
+}
+
+# ============================================
 # ГЛАВНОЕ МЕНЮ
 # ============================================
 
 function Show-MainMenu {
     Clear-Host
-    Write-Host "==================================" -ForegroundColor Cyan
-    Write-Host "     1C SERVER MANAGER ULTIMATE    " -ForegroundColor White
-    Write-Host "            v27.12                 " -ForegroundColor DarkGray
-    Write-Host "==================================" -ForegroundColor Cyan
+    Write-Host "==========================================" -ForegroundColor Cyan
+    Write-Host "     1C SERVER MANAGER ULTIMATE            " -ForegroundColor White
+    Write-Host "            v28.0                         " -ForegroundColor DarkGray
+    Write-Host "==========================================" -ForegroundColor Cyan
     Write-Host ""
     Write-Host "=== 1C SERVER SERVICES ===" -ForegroundColor Yellow
     Write-Host " 1 - Show installed platforms"
@@ -1840,12 +2172,15 @@ function Show-MainMenu {
     Write-Host "11 - Show infobases via RAS"
     Write-Host "12 - Show infobases from cluster file"
     Write-Host ""
+    Write-Host "=== COM CONNECTION ===" -ForegroundColor Yellow
+    Write-Host "13 - Setup 1C COM connection"
+    Write-Host ""
     Write-Host "0 - Exit"
     Write-Host ""
-    Write-Host "==================================" -ForegroundColor Cyan
+    Write-Host "==========================================" -ForegroundColor Cyan
     Write-Host "At any prompt, enter 0 to cancel" -ForegroundColor Yellow
     Write-Host "Log file: $Script:LogFile" -ForegroundColor DarkGray
-    Write-Host "==================================" -ForegroundColor Cyan
+    Write-Host "==========================================" -ForegroundColor Cyan
 }
 
 # ============================================
@@ -1905,6 +2240,10 @@ do {
         "12" {
             Clear-Host
             Show-InfobasesFromFile
+        }
+        "13" {
+            Clear-Host
+            Setup-1CCOMConnection
         }
         "0" { 
             Clear-Host
