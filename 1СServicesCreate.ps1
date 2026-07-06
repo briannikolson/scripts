@@ -1,8 +1,7 @@
 # ============================================
-# 1C SERVER MANAGER - ULTIMATE EDITION v28.0
+# 1C SERVER MANAGER
 # ============================================
 
-# Проверка прав администратора
 if (-NOT ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")) {
     Write-Host "This script requires Administrator privileges!" -ForegroundColor Red
     Write-Host "Restarting with elevation..." -ForegroundColor Yellow
@@ -13,9 +12,6 @@ if (-NOT ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdent
     exit
 }
 
-# ============================================
-# ГЛОБАЛЬНЫЕ НАСТРОЙКИ
-# ============================================
 $Script:LogFile = "C:\1C_Server_Manager.log"
 
 # Проверка возможности записи в лог
@@ -28,10 +24,6 @@ catch {
     $Script:LogFile = "$env:TEMP\1C_Server_Manager.log"
     Write-Host "Using fallback log: $Script:LogFile" -ForegroundColor Yellow
 }
-
-# ============================================
-# ФУНКЦИИ ЛОГИРОВАНИЯ
-# ============================================
 
 function Write-Log {
     param(
@@ -49,10 +41,6 @@ function Write-Log {
         # Игнорируем ошибки логирования
     }
 }
-
-# ============================================
-# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
-# ============================================
 
 function WaitForKeyPress {
     Write-Host ""
@@ -80,6 +68,20 @@ function Test-PortInUse {
     }
     catch {
         return $false
+    }
+}
+
+function Test-PortAvailable {
+    param([int]$Port)
+    
+    try {
+        $tcpConnection = New-Object System.Net.Sockets.TcpClient
+        $tcpConnection.Connect('127.0.0.1', $Port)
+        $tcpConnection.Close()
+        return $false
+    }
+    catch {
+        return $true
     }
 }
 
@@ -201,10 +203,6 @@ function Test-WriteAccess {
     }
 }
 
-# ============================================
-# ДИСКИ
-# ============================================
-
 function Get-AvailableDisks {
     Get-CimInstance Win32_LogicalDisk |
     Where-Object { $_.DriveType -eq 3 } |
@@ -242,10 +240,6 @@ function Select-Disk {
     
     return $disk.DeviceID.TrimEnd(":")
 }
-
-# ============================================
-# ПЛАТФОРМЫ 1С
-# ============================================
 
 function Get-1CPlatforms {
     $paths = @(
@@ -335,10 +329,6 @@ function Show-Platforms {
         $i++
     }
 }
-
-# ============================================
-# УПРАВЛЕНИЕ СЛУЖБАМИ 1С (ПУНКТЫ 1-7)
-# ============================================
 
 function Get-1CServices {
     Get-CimInstance Win32_Service |
@@ -791,10 +781,6 @@ function Change-1CServerPort {
     }
 }
 
-# ============================================
-# РАС СЛУЖБЫ (ПУНКТЫ 8-10)
-# ============================================
-
 function Get-RASServices {
     $services = Get-CimInstance Win32_Service | Where-Object {$_.PathName -match "ras\.exe"}
     
@@ -935,70 +921,99 @@ function Create-RASService {
             $i++
         }
         Write-Host ""
-        $useExisting = Read-Host "Connect to existing server? (y/n) (n - manual entry)"
+        
+        do {
+            $useExisting = Read-Host "Connect to existing server? (y/n) (n - manual entry)"
+            $useExisting = $useExisting.ToLower()
+            
+            if ($useExisting -eq 'y' -or $useExisting -eq 'n') {
+                break
+            }
+            
+            Write-Host "ERROR: Please enter 'y' or 'n' only!" -ForegroundColor Red
+        } while ($true)
         
         if($useExisting -eq 'y') {
-            $srvChoice = Read-Host "Select server number (or 0 to cancel)"
-            if($srvChoice -eq "0") {
-                Write-Host "Operation cancelled" -ForegroundColor Yellow
-                return
-            }
-            $selectedServer = $servers[$srvChoice-1]
-            if($selectedServer) {
-                $ctrlPort = $selectedServer.Port
-                $agentName = "localhost"
-                Write-Host "Will connect to agent on port: $ctrlPort" -ForegroundColor Green
+            do {
+                $srvChoice = Read-Host "Select server number (or 0 to cancel)"
                 
-                if(-not (Test-AgentConnection -Port ([int]$ctrlPort) -Hostname $agentName)) {
+                if($srvChoice -eq "0") {
+                    Write-Host "Operation cancelled" -ForegroundColor Yellow
                     return
                 }
                 
-                $rasPlatform = $platforms | Where-Object { 
-                    $_.HasRAS -and $_.Version -eq $selectedServer.Version 
-                } | Select-Object -First 1
-                
-                if(-not $rasPlatform) {
-                    Write-Host ""
-                    Write-Host "ERROR: No RAS found for version $($selectedServer.Version)!" -ForegroundColor Red
-                    Write-Host "Available RAS versions:" -ForegroundColor Yellow
-                    $platforms | Where-Object { $_.HasRAS } | ForEach-Object {
-                        Write-Host "  - $($_.Version)" -ForegroundColor Gray
+                if($srvChoice -match '^\d+$') {
+                    $selectedServer = $servers[$srvChoice-1]
+                    if($selectedServer) {
+                        break
                     }
-                    
+                }
+                
+                Write-Host "Invalid selection. Please enter a valid number." -ForegroundColor Red
+            } while ($true)
+            
+            $ctrlPort = $selectedServer.Port
+            $agentName = "localhost"
+            Write-Host "Will connect to agent on port: $ctrlPort" -ForegroundColor Green
+            
+            if(-not (Test-AgentConnection -Port ([int]$ctrlPort) -Hostname $agentName)) {
+                return
+            }
+            
+            $rasPlatform = $platforms | Where-Object { 
+                $_.HasRAS -and $_.Version -eq $selectedServer.Version 
+            } | Select-Object -First 1
+            
+            if(-not $rasPlatform) {
+                Write-Host ""
+                Write-Host "ERROR: No RAS found for version $($selectedServer.Version)!" -ForegroundColor Red
+                Write-Host "Available RAS versions:" -ForegroundColor Yellow
+                $platforms | Where-Object { $_.HasRAS } | ForEach-Object {
+                    Write-Host "  - $($_.Version)" -ForegroundColor Gray
+                }
+                
+                do {
                     $useFallback = Read-Host "Use first available RAS version instead? (y/n)"
-                    if($useFallback -eq 'y') {
+                    $useFallback = $useFallback.ToLower()
+                    
+                    if ($useFallback -eq 'y') {
                         $rasPlatform = $platforms | Where-Object { $_.HasRAS } | Select-Object -First 1
                         Write-Host "Using fallback RAS version: $($rasPlatform.Version)" -ForegroundColor Yellow
-                    } else {
+                        break
+                    } elseif ($useFallback -eq 'n') {
                         Write-Host "Operation cancelled" -ForegroundColor Yellow
                         return
                     }
-                } else {
-                    Write-Host "Using RAS version: $($rasPlatform.Version) (matches agent)" -ForegroundColor Green
-                }
+                    
+                    Write-Host "ERROR: Please enter 'y' or 'n' only!" -ForegroundColor Red
+                } while ($true)
             } else {
-                Write-Host "Invalid selection, using manual entry" -ForegroundColor Yellow
-                $ctrlPort = Read-Host "Enter agent port (default: 1540)"
-                if([string]::IsNullOrWhiteSpace($ctrlPort)){ $ctrlPort = "1540" }
-                $agentName = Read-Host "Enter agent host (default: localhost)"
-                if([string]::IsNullOrWhiteSpace($agentName)){ $agentName = "localhost" }
-                
-                if(-not (Test-AgentConnection -Port ([int]$ctrlPort) -Hostname $agentName)) {
-                    return
-                }
-                
-                $rasPlatform = Get-RASPlatformByAgent -AgentPort $ctrlPort -Platforms $platforms -Servers $servers
-                
-                if(-not $rasPlatform) {
-                    $rasPlatform = $platforms | Where-Object { $_.HasRAS } | Select-Object -First 1
-                    Write-Host "Using first available RAS: $($rasPlatform.Version)" -ForegroundColor Yellow
-                }
+                Write-Host "Using RAS version: $($rasPlatform.Version) (matches agent)" -ForegroundColor Green
             }
         } else {
-            $ctrlPort = Read-Host "Enter agent port (default: 1540)"
-            if([string]::IsNullOrWhiteSpace($ctrlPort)){ $ctrlPort = "1540" }
-            $agentName = Read-Host "Enter agent host (default: localhost)"
-            if([string]::IsNullOrWhiteSpace($agentName)){ $agentName = "localhost" }
+            do {
+                $ctrlPort = Read-Host "Enter agent port (default: 1540)"
+                if([string]::IsNullOrWhiteSpace($ctrlPort)){ 
+                    $ctrlPort = "1540"
+                    break
+                }
+                if($ctrlPort -match '^\d+$' -and [int]$ctrlPort -gt 0 -and [int]$ctrlPort -le 65535) {
+                    break
+                }
+                Write-Host "Invalid port number. Please enter a valid port (1-65535)." -ForegroundColor Red
+            } while ($true)
+            
+            do {
+                $agentName = Read-Host "Enter agent host (default: localhost)"
+                if([string]::IsNullOrWhiteSpace($agentName)){ 
+                    $agentName = "localhost"
+                    break
+                }
+                if($agentName -match '^[a-zA-Z0-9\.\-_]+$') {
+                    break
+                }
+                Write-Host "Invalid hostname. Please enter a valid hostname." -ForegroundColor Red
+            } while ($true)
             
             if(-not (Test-AgentConnection -Port ([int]$ctrlPort) -Hostname $agentName)) {
                 return
@@ -1007,21 +1022,47 @@ function Create-RASService {
             $rasPlatform = Get-RASPlatformByAgent -AgentPort $ctrlPort -Platforms $platforms -Servers $servers
             
             if(-not $rasPlatform) {
-                $useFallback = Read-Host "Use first available RAS version? (y/n)"
-                if($useFallback -eq 'y') {
-                    $rasPlatform = $platforms | Where-Object { $_.HasRAS } | Select-Object -First 1
-                    Write-Host "Using fallback RAS version: $($rasPlatform.Version)" -ForegroundColor Yellow
-                } else {
-                    Write-Host "Operation cancelled" -ForegroundColor Yellow
-                    return
-                }
+                do {
+                    $useFallback = Read-Host "Use first available RAS version? (y/n)"
+                    $useFallback = $useFallback.ToLower()
+                    
+                    if ($useFallback -eq 'y') {
+                        $rasPlatform = $platforms | Where-Object { $_.HasRAS } | Select-Object -First 1
+                        Write-Host "Using fallback RAS version: $($rasPlatform.Version)" -ForegroundColor Yellow
+                        break
+                    } elseif ($useFallback -eq 'n') {
+                        Write-Host "Operation cancelled" -ForegroundColor Yellow
+                        return
+                    }
+                    
+                    Write-Host "ERROR: Please enter 'y' or 'n' only!" -ForegroundColor Red
+                } while ($true)
             }
         }
     } else {
-        $ctrlPort = Read-Host "Enter agent port (default: 1540)"
-        if([string]::IsNullOrWhiteSpace($ctrlPort)){ $ctrlPort = "1540" }
-        $agentName = Read-Host "Enter agent host (default: localhost)"
-        if([string]::IsNullOrWhiteSpace($agentName)){ $agentName = "localhost" }
+        do {
+            $ctrlPort = Read-Host "Enter agent port (default: 1540)"
+            if([string]::IsNullOrWhiteSpace($ctrlPort)){ 
+                $ctrlPort = "1540"
+                break
+            }
+            if($ctrlPort -match '^\d+$' -and [int]$ctrlPort -gt 0 -and [int]$ctrlPort -le 65535) {
+                break
+            }
+            Write-Host "Invalid port number. Please enter a valid port (1-65535)." -ForegroundColor Red
+        } while ($true)
+        
+        do {
+            $agentName = Read-Host "Enter agent host (default: localhost)"
+            if([string]::IsNullOrWhiteSpace($agentName)){ 
+                $agentName = "localhost"
+                break
+            }
+            if($agentName -match '^[a-zA-Z0-9\.\-_]+$') {
+                break
+            }
+            Write-Host "Invalid hostname. Please enter a valid hostname." -ForegroundColor Red
+        } while ($true)
         
         if(-not (Test-AgentConnection -Port ([int]$ctrlPort) -Hostname $agentName)) {
             return
@@ -1069,11 +1110,13 @@ function Create-RASService {
     $rasPath = $rasPlatform.Ragent -replace "ragent.exe", "ras.exe"
     $arch = Get-1CArchitecture $rasPath
     
-    $binary = "`"$rasPath`" cluster --service --ras-port=$rasPort $agentName`:$ctrlPort"
+    $binary = "`"$rasPath`" cluster --service --port=$rasPort $agentName`:$ctrlPort"
     
-    $serviceShortName = "1C_RAS_$($rasPlatform.Version)_agent$ctrlPort"
+    # Короткое имя версии без точек для имени службы
+    $versionShort = $rasPlatform.Version -replace '\.', '_'
+    $serviceShortName = "1C_RAS_${versionShort}_agent${ctrlPort}"
     $serviceDisplayName = "1C:Enterprise 8.3 ($($rasPlatform.Version)) RAS Agent ($arch) (agent:$ctrlPort, ras:$rasPort)"
-    $serviceDescription = "1C:Enterprise 8.3 RAS Agent ($arch) Parameters: ras-port: $rasPort, monitored server: $agentName`:$ctrlPort"
+    $serviceDescription = "1C:Enterprise 8.3 RAS Agent ($arch) Parameters: port: $rasPort, monitored server: $agentName`:$ctrlPort"
     
     Write-Host ""
     Write-Host "=== СОЗДАНИЕ RAS СЛУЖБЫ ===" -ForegroundColor Cyan
@@ -1112,27 +1155,50 @@ function Create-RASService {
             Write-Host "Removing existing service..." -ForegroundColor Yellow
             Stop-Service $serviceShortName -Force -ErrorAction SilentlyContinue
             sc.exe delete $serviceShortName
-            Start-Sleep -Seconds 5
+            Start-Sleep -Seconds 2
         }
         
         Write-Host "Creating RAS service..." -ForegroundColor Cyan
         
-        $newServiceParams = @{
-            Name = $serviceShortName
-            BinaryPathName = $binary
-            DisplayName = $serviceDisplayName
-            StartupType = "Automatic"
-            ErrorAction = "Stop"
-        }
+        $scArgs = @(
+            "create", 
+            $serviceShortName, 
+            "binPath=", $binary, 
+            "start=", "auto", 
+            "error=", "ignore",
+            "displayname=", $serviceDisplayName
+        )
         
         if($rasUserName -ne "LocalSystem") {
-            $newServiceParams.Credential = [PSCredential]::new($rasUserName, (ConvertTo-SecureString $rasUserPwdPlain -AsPlainText -Force))
+            $scArgs += "obj="
+            $scArgs += $rasUserName
+            $scArgs += "password="
+            $scArgs += $rasUserPwdPlain
         }
         
-        New-Service @newServiceParams
+        Write-Host "Running: sc $($scArgs -join ' ')" -ForegroundColor DarkGray
+        $scResult = & sc.exe $scArgs 2>&1
         
-        sc.exe description $serviceShortName "`"$serviceDescription`""
-        Write-Host "Service description set: $serviceDescription" -ForegroundColor DarkGray
+        if($LASTEXITCODE -ne 0) {
+            Write-Host "sc create failed, trying New-Service..." -ForegroundColor Yellow
+            
+            $newServiceParams = @{
+                Name = $serviceShortName
+                BinaryPathName = $binary
+                DisplayName = $serviceDisplayName
+                StartupType = "Automatic"
+                ErrorAction = "Stop"
+            }
+            
+            if($rasUserName -ne "LocalSystem") {
+                $newServiceParams.Credential = [PSCredential]::new($rasUserName, (ConvertTo-SecureString $rasUserPwdPlain -AsPlainText -Force))
+            }
+            
+            New-Service @newServiceParams
+        } else {
+            Write-Host "Service created successfully via sc" -ForegroundColor Green
+            sc.exe description $serviceShortName $serviceDescription
+        }
         
         Write-Log "RAS service created: $serviceShortName on port $rasPort"
         
@@ -1147,7 +1213,6 @@ function Create-RASService {
             Write-Host "RAS service started successfully!" -ForegroundColor Green
             Write-Host "Service name: $serviceShortName" -ForegroundColor Green
             Write-Host "Display name: $serviceDisplayName" -ForegroundColor Gray
-            Write-Host "Description: $serviceDescription" -ForegroundColor DarkGray
             Write-Host "Connected to agent: $agentName`:$ctrlPort" -ForegroundColor Gray
             
             $portCheck = netstat -ano | Select-String $rasPort | Select-String "LISTENING"
@@ -1168,10 +1233,8 @@ function Create-RASService {
         Write-Host "Try creating service manually:" -ForegroundColor Cyan
         if($rasUserName -ne "LocalSystem") {
             Write-Host "  sc create `"$serviceShortName`" binPath= `"$binary`" start= auto obj= `"$rasUserName`" password= `"****`" displayname= `"$serviceDisplayName`"" -ForegroundColor Gray
-            Write-Host "  sc description $serviceShortName `"$serviceDescription`"" -ForegroundColor Gray
         } else {
             Write-Host "  sc create `"$serviceShortName`" binPath= `"$binary`" start= auto displayname= `"$serviceDisplayName`"" -ForegroundColor Gray
-            Write-Host "  sc description $serviceShortName `"$serviceDescription`"" -ForegroundColor Gray
         }
         Write-Host "  Start-Service $serviceShortName" -ForegroundColor Gray
     }
@@ -1218,10 +1281,6 @@ function Delete-RASService {
     
     Remove-RASService $selectedService.Name
 }
-
-# ============================================
-# ПОЛУЧЕНИЕ ИНФОРМАЦИОННЫХ БАЗ ИЗ ФАЙЛА (ПУНКТ 12)
-# ============================================
 
 function Find-1CV8ClstFiles {
     $allFiles = @()
@@ -1468,10 +1527,6 @@ function Show-InfobasesFromFile {
     Write-Host "Total unique infobases found: $($infobases.Count)" -ForegroundColor Cyan
     Write-Host ""
 }
-
-# ============================================
-# ПОЛУЧЕНИЕ ИНФОРМАЦИОННЫХ БАЗ ЧЕРЕЗ RAS (ПУНКТ 11)
-# ============================================
 
 function Get-RACPath {
     $platforms = Get-1CPlatforms
@@ -1734,7 +1789,8 @@ function Show-InfobasesViaRAS {
                     Write-Host "   DBMS: $dbms" -ForegroundColor Cyan
                     Write-Host "   DB Server: $dbServer" -ForegroundColor Cyan
                     Write-Host "   DB Name: $dbName" -ForegroundColor Cyan
-                    Write-Host "   Security Level: $securityLevel" -ForegroundColor Yellow                    Write-Host "   Sessions Deny: $sessionsDeny" -ForegroundColor $(if($sessionsDeny -eq "on"){"Red"}else{"Green"})
+                    Write-Host "   Security Level: $securityLevel" -ForegroundColor Yellow
+                    Write-Host "   Sessions Deny: $sessionsDeny" -ForegroundColor $(if($sessionsDeny -eq "on"){"Red"}else{"Green"})
                     Write-Host ""
                     $idx++
                 }
@@ -1801,15 +1857,10 @@ function Show-InfobasesViaRAS {
     }
 }
 
-# ============================================
-# ГЛАВНОЕ МЕНЮ
-# ============================================
-
 function Show-MainMenu {
     Clear-Host
     Write-Host "==========================================" -ForegroundColor Cyan
-    Write-Host "     1C SERVER MANAGER ULTIMATE            " -ForegroundColor White
-    Write-Host "            v28.0                         " -ForegroundColor DarkGray
+    Write-Host "            1C SERVER MANAGER             " -ForegroundColor White
     Write-Host "==========================================" -ForegroundColor Cyan
     Write-Host ""
     Write-Host "=== 1C SERVER SERVICES ===" -ForegroundColor Yellow
@@ -1837,10 +1888,6 @@ function Show-MainMenu {
     Write-Host "Log file: $Script:LogFile" -ForegroundColor DarkGray
     Write-Host "==========================================" -ForegroundColor Cyan
 }
-
-# ============================================
-# ОСНОВНОЙ ЦИКЛ
-# ============================================
 
 do {
     Show-MainMenu
