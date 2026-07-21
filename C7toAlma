@@ -3,7 +3,7 @@
 ##############################################################################
 # Интерактивный скрипт обновления CentOS 7 до AlmaLinux 8
 # Скачиваем скрипт
-# curl -O https://raw.githubusercontent.com/briannikolson/scripts/main/C7toAlma
+# curl -O https://raw.githubusercontent.com/briannikolson/scripts/refs/heads/main/C7toAlma
 # Делаем его исполняемым
 # chmod +x C7toAlma
 # Проверяем, что вы находитесь в той же директории, где лежит скрипт
